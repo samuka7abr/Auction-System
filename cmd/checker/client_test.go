@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -15,13 +17,14 @@ func TestDurabilityReadsTheThreeWaysTheCountsCanDiffer(t *testing.T) {
 	}{
 		// db == client: nothing was confirmed that the database does not have.
 		{"equal", cellTotals{Bids: 100, MaxSeq: 100}, verdictOK},
-		// db > client: legitimate in etapa 1 — the 201 was written and its
-		// response never arrived. Etapa 2 drops this tolerance.
-		{"database ahead", cellTotals{Bids: 101, MaxSeq: 101}, verdictWarn},
+		// Idempotent transport recovery makes a durable response observable, so
+		// either direction is now a failed cell.
+		{"database ahead", cellTotals{Bids: 101, MaxSeq: 100}, verdictFail},
 		// db < client: a lost write, and the failure this harness exists for.
-		{"database behind", cellTotals{Bids: 99, MaxSeq: 99}, verdictFail},
-		// The watermark catches it even when the counts happen to agree.
+		{"database behind", cellTotals{Bids: 99, MaxSeq: 100}, verdictFail},
+		// The watermark catches either direction even when counts agree.
 		{"watermark behind", cellTotals{Bids: 100, MaxSeq: 99}, verdictFail},
+		{"watermark ahead", cellTotals{Bids: 100, MaxSeq: 101}, verdictFail},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -47,6 +50,12 @@ func TestCellValidity(t *testing.T) {
 		{"errors at one percent", func(c *clientReport) { c.Error = i64(10); c.Attempts = i64(1000) }, calmGenerator(), verdictFail},
 		{"errors just under", func(c *clientReport) { c.Error = i64(9); c.Attempts = i64(1000) }, calmGenerator(), verdictOK},
 		{"no attempts at all", func(c *clientReport) { c.Attempts = i64(0) }, calmGenerator(), verdictFail},
+		{"duplicates not selected", func(c *clientReport) { c.DuplicatesSelected = i64(0) }, calmGenerator(), verdictFail},
+		{"duplicates not injected", func(c *clientReport) { c.DuplicatesInjected = i64(0) }, calmGenerator(), verdictFail},
+		{"too many duplicates", func(c *clientReport) { c.DuplicatesInjected = i64(11) }, calmGenerator(), verdictFail},
+		{"no replay", func(c *clientReport) { c.Replayed = i64(0) }, calmGenerator(), verdictFail},
+		{"no in-flight response", func(c *clientReport) { c.InFlight = i64(0) }, calmGenerator(), verdictWarn},
+		{"negative counter", func(c *clientReport) { c.TransportRetries = i64(-1) }, calmGenerator(), verdictFail},
 		// A saturated generator warns rather than fails: discarding the cell is
 		// the reader's call, but never a silent one.
 		{"generator saturated", func(*clientReport) {}, saturatedGenerator(), verdictWarn},
@@ -58,6 +67,37 @@ func TestCellValidity(t *testing.T) {
 			tc.client(&c)
 			if got := checkCellValidity(c, tc.env); got.Verdict != tc.want {
 				t.Errorf("verdict = %s (%s), want %s", got.Verdict, got.Detail, tc.want)
+			}
+		})
+	}
+}
+
+func TestIdempotencyFieldsAreRequired(t *testing.T) {
+	fields := []string{"replayed", "inFlight", "duplicatesSelected", "duplicatesInjected", "transportRetries"}
+	complete := map[string]any{
+		"accepted": 1, "conflict": 0, "outbid": 0, "closed": 0,
+		"invalid": 0, "error": 0, "exhausted": 0, "attempts": 1, "maxSeqSeen": 1,
+		"replayed": 1, "inFlight": 1, "duplicatesSelected": 1,
+		"duplicatesInjected": 1, "transportRetries": 0,
+	}
+
+	for _, field := range fields {
+		t.Run(field, func(t *testing.T) {
+			doc := make(map[string]any, len(complete))
+			for key, value := range complete {
+				doc[key] = value
+			}
+			delete(doc, field)
+			body, err := json.Marshal(doc)
+			if err != nil {
+				t.Fatalf("marshal fixture: %v", err)
+			}
+			dir := t.TempDir()
+			write(t, filepath.Join(dir, "client.json"), string(body))
+
+			_, err = readClient(dir)
+			if err == nil || !strings.Contains(err.Error(), field) {
+				t.Fatalf("readClient error = %v, want missing %s", err, field)
 			}
 		})
 	}
@@ -88,7 +128,8 @@ func TestUnreadableArtefactsAreNotVerifiable(t *testing.T) {
 func TestEnvWithoutGeneratorIsNotVerifiable(t *testing.T) {
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "client.json"), `{"accepted":1,"conflict":0,"outbid":0,"closed":0,
-		"invalid":0,"error":0,"exhausted":0,"attempts":1,"maxSeqSeen":1}`)
+		"invalid":0,"error":0,"exhausted":0,"attempts":1,"maxSeqSeen":1,
+		"replayed":1,"inFlight":1,"duplicatesSelected":1,"duplicatesInjected":1,"transportRetries":0}`)
 	write(t, filepath.Join(dir, "env.json"), `{"run": "cell"}`)
 
 	if code := execute("cell", dir, false, io.Discard); code != exitUnverifiable {
@@ -101,6 +142,8 @@ func baseClient() clientReport {
 		Run: "t", Strategy: "optimistic", Auctions: 1, Policy: "immediate", Scenario: "smoke",
 		Accepted: i64(100), Conflict: i64(400), Outbid: i64(10), Closed: i64(0),
 		Invalid: i64(0), Error: i64(0), Exhausted: i64(2), Attempts: i64(600), MaxSeqSeen: i64(100),
+		Replayed: i64(5), InFlight: i64(3), DuplicatesSelected: i64(10),
+		DuplicatesInjected: i64(10), TransportRetries: i64(0),
 	}
 }
 
