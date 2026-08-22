@@ -34,6 +34,12 @@ type clientReport struct {
 	Exhausted  *int64 `json:"exhausted"`
 	Attempts   *int64 `json:"attempts"`
 	MaxSeqSeen *int64 `json:"maxSeqSeen"`
+
+	Replayed           *int64 `json:"replayed"`
+	InFlight           *int64 `json:"inFlight"`
+	DuplicatesSelected *int64 `json:"duplicatesSelected"`
+	DuplicatesInjected *int64 `json:"duplicatesInjected"`
+	TransportRetries   *int64 `json:"transportRetries"`
 }
 
 func (c clientReport) required() map[string]*int64 {
@@ -41,6 +47,9 @@ func (c clientReport) required() map[string]*int64 {
 		"accepted": c.Accepted, "conflict": c.Conflict, "outbid": c.Outbid,
 		"closed": c.Closed, "invalid": c.Invalid, "error": c.Error,
 		"exhausted": c.Exhausted, "attempts": c.Attempts, "maxSeqSeen": c.MaxSeqSeen,
+		"replayed": c.Replayed, "inFlight": c.InFlight,
+		"duplicatesSelected": c.DuplicatesSelected, "duplicatesInjected": c.DuplicatesInjected,
+		"transportRetries": c.TransportRetries,
 	}
 }
 
@@ -136,6 +145,24 @@ func checkCellValidity(c clientReport, e envReport) finding {
 	var fails, warns []string
 
 	attempts, invalid, errs, closed := *c.Attempts, *c.Invalid, *c.Error, *c.Closed
+	replayed, inFlight := *c.Replayed, *c.InFlight
+	selected, injected := *c.DuplicatesSelected, *c.DuplicatesInjected
+
+	counters := []struct {
+		name  string
+		value int64
+	}{
+		{"accepted", *c.Accepted}, {"conflict", *c.Conflict}, {"outbid", *c.Outbid},
+		{"closed", closed}, {"invalid", invalid}, {"error", errs},
+		{"exhausted", *c.Exhausted}, {"attempts", attempts}, {"replayed", replayed},
+		{"inFlight", inFlight}, {"duplicatesSelected", selected},
+		{"duplicatesInjected", injected}, {"transportRetries", *c.TransportRetries},
+	}
+	for _, counter := range counters {
+		if counter.value < 0 {
+			fails = append(fails, fmt.Sprintf("%s=%d: contador negativo", counter.name, counter.value))
+		}
+	}
 
 	if attempts == 0 {
 		fails = append(fails, "nenhuma tentativa registrada")
@@ -144,6 +171,21 @@ func checkCellValidity(c clientReport, e envReport) finding {
 		// 400 expected_version_required. Decisão 21 put this series here for
 		// free: above zero it means the k6 sent a bid without expectedVersion.
 		fails = append(fails, fmt.Sprintf("invalid=%d: k6 mal configurado", invalid))
+	}
+	if selected == 0 {
+		fails = append(fails, "nenhuma duplicata selecionada")
+	}
+	if injected == 0 {
+		fails = append(fails, "nenhuma duplicata injetada")
+	}
+	if replayed == 0 {
+		fails = append(fails, "nenhum replay observado")
+	}
+	if injected > selected {
+		fails = append(fails, fmt.Sprintf("duplicatas injetadas=%d acima das selecionadas=%d", injected, selected))
+	}
+	if inFlight == 0 {
+		warns = append(warns, "in_flight=0: concorrente pode ter encontrado replay")
 	}
 
 	var rate float64
@@ -166,15 +208,19 @@ func checkCellValidity(c clientReport, e envReport) finding {
 		warns = append(warns, fmt.Sprintf("closed=%d: ENDS_IN curto demais", closed))
 	}
 
+	evidence := fmt.Sprintf("replayed=%d in_flight=%d selecionadas=%d injetadas=%d",
+		replayed, inFlight, selected, injected)
+
 	switch {
 	case len(fails) > 0:
 		f.Verdict = verdictFail
-		f.Detail = strings.Join(append(fails, warns...), " · ")
+		f.Detail = strings.Join(append(append(fails, warns...), evidence), " · ")
 	case len(warns) > 0:
 		f.Verdict = verdictWarn
-		f.Detail = strings.Join(warns, " · ")
+		f.Detail = strings.Join(append(warns, evidence), " · ")
 	default:
-		f.Detail = fmt.Sprintf("invalid=0 erro=%s gerador=%.0f%% do limite", percent(rate), *e.Generator.CPUPctPeak)
+		f.Detail = fmt.Sprintf("invalid=0 erro=%s gerador=%.0f%% do limite · %s",
+			percent(rate), *e.Generator.CPUPctPeak, evidence)
 	}
 	return f
 }
