@@ -16,6 +16,7 @@ import (
 	"github.com/samuka7abr/bid-storm/internal/bid"
 	"github.com/samuka7abr/bid-storm/internal/bid/optimistic"
 	"github.com/samuka7abr/bid-storm/internal/bid/pessimistic"
+	"github.com/samuka7abr/bid-storm/internal/bid/shard"
 	"github.com/samuka7abr/bid-storm/internal/metrics"
 )
 
@@ -49,7 +50,10 @@ func NewEngine(strategy string, pool *pgxpool.Pool, reg prometheus.Registerer) (
 		// what describes this mechanism is measured from within (decisão 28).
 		engine = pessimistic.New(pool, metrics.NewLockWait(reg))
 	case StrategyShard:
-		return nil, fmt.Errorf("BID_STRATEGY=%s: the single-writer engine arrives in etapa 3", strategy)
+		// No lock observer, no series of its own here: this engine is not
+		// instrumented from the inside until spec 02 (decisão 58), so it is
+		// built and wrapped exactly like the optimistic engine above.
+		engine = shard.New(pool)
 	default:
 		return nil, fmt.Errorf("BID_STRATEGY=%q is not a strategy: want %s, %s or %s",
 			strategy, StrategyOptimistic, StrategyPessimistic, StrategyShard)
