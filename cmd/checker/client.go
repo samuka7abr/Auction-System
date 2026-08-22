@@ -95,13 +95,9 @@ func readFile(path string, into any) error {
 	return nil
 }
 
-// checkDurability is I5, and its asymmetry is decisão 4.
-//
-// db < client is a bid the server confirmed and the database does not have:
-// a lost write, and the one failure this whole harness exists to catch.
-// db > client is legitimate in etapa 1 — without idempotency, a 201 whose
-// response never reached the client is a real and harmless divergence. Etapa 2
-// drops that tolerance.
+// checkDurability is I5. Idempotent transport recovery removes the etapa 1
+// asymmetry: the durable history and the logical acceptances must now agree in
+// both count and watermark (decisão 46).
 func checkDurability(db cellTotals, c clientReport) finding {
 	f := finding{ID: "I5", Name: "durabilidade db x cliente", Verdict: verdictOK}
 	accepted, maxSeq := *c.Accepted, *c.MaxSeqSeen
@@ -111,9 +107,8 @@ func checkDurability(db cellTotals, c clientReport) finding {
 		f.Verdict = verdictFail
 		f.Detail = fmt.Sprintf("LANCE CONFIRMADO SUMIU: db=%d cliente=%d", db.Bids, accepted)
 	case db.Bids > accepted:
-		f.Verdict = verdictWarn
-		f.Detail = fmt.Sprintf("db=%d cliente=%d (+%s não entregue)", db.Bids, accepted,
-			plural64(db.Bids-accepted, "resposta", "respostas"))
+		f.Verdict = verdictFail
+		f.Detail = fmt.Sprintf("BANCO À FRENTE: db=%d cliente=%d", db.Bids, accepted)
 	default:
 		f.Detail = fmt.Sprintf("db=%d cliente=%d", db.Bids, accepted)
 	}
@@ -122,9 +117,9 @@ func checkDurability(db cellTotals, c clientReport) finding {
 	// in any auction. Together with I1's density it subsumes the per-auction
 	// attribution — a durable 201 cannot vanish without either dropping the count
 	// below the client's or opening a hole in some auction's sequence.
-	if db.MaxSeq < maxSeq {
+	if db.MaxSeq != maxSeq {
 		f.Verdict = verdictFail
-		f.Detail += fmt.Sprintf(" · seq confirmado ao cliente não existe no banco: %d < %d", db.MaxSeq, maxSeq)
+		f.Detail += fmt.Sprintf(" · watermark divergente: db=%d cliente=%d", db.MaxSeq, maxSeq)
 	}
 	return f
 }
