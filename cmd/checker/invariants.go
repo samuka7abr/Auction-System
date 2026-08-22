@@ -11,12 +11,16 @@ import (
 // cellTotals is the size of the cell just verified: what the green lines report,
 // and what I5 compares against the client.
 type cellTotals struct {
-	Auctions int64
-	Bids     int64
-	MaxSeq   int64
+	Auctions        int64
+	Bids            int64
+	MaxSeq          int64
+	BidsWithKey     int64
+	DistinctBidKeys int64
 }
 
-const totalsSQL = `SELECT count(DISTINCT auction_id), count(*), coalesce(max(seq), 0) FROM bids`
+const totalsSQL = `SELECT count(DISTINCT auction_id), count(*), coalesce(max(seq), 0),
+                          count(idempotency_key), count(DISTINCT idempotency_key)
+                     FROM bids`
 
 // Every SQL invariant is a query that returns no row when the invariant holds,
 // and one already-formatted line per offender when it does not. Keeping the
@@ -118,17 +122,32 @@ var sqlInvariants = []sqlInvariant{
 			 ORDER BY b.created_at
 			 LIMIT 5`,
 	},
-	// Etapa 2 adds the idempotency invariant here — pure SQL, like these four.
+	{
+		id:   "I7",
+		name: "chaves idempotentes presentes e únicas",
+		query: `
+			SELECT format('linhas=%s com_chave=%s distintas=%s',
+			              count(*), count(idempotency_key), count(DISTINCT idempotency_key))
+			  FROM bids
+			HAVING count(*) <> count(idempotency_key)
+			    OR count(*) <> count(DISTINCT idempotency_key)`,
+		summary: func(t cellTotals) string {
+			return fmt.Sprintf("linhas=%d com_chave=%d distintas=%d",
+				t.Bids, t.BidsWithKey, t.DistinctBidKeys)
+		},
+	},
 }
 
-// checkSQL runs the four invariants Postgres can prove on its own.
+// checkSQL runs the five invariants Postgres can prove on its own.
 //
 // A violation never stops the others: the cell's report has to say everything
 // that is wrong at once. A query that errors does stop them, because it means
 // the database is not answering and no verdict below it would be worth reading.
 func checkSQL(ctx context.Context, pool *pgxpool.Pool) ([]finding, cellTotals, error) {
 	var totals cellTotals
-	if err := pool.QueryRow(ctx, totalsSQL).Scan(&totals.Auctions, &totals.Bids, &totals.MaxSeq); err != nil {
+	if err := pool.QueryRow(ctx, totalsSQL).Scan(
+		&totals.Auctions, &totals.Bids, &totals.MaxSeq, &totals.BidsWithKey, &totals.DistinctBidKeys,
+	); err != nil {
 		return nil, totals, fmt.Errorf("count the cell: %w", err)
 	}
 

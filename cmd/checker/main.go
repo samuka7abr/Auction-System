@@ -100,11 +100,19 @@ func execute(run, results string, asJSON bool, out io.Writer) int {
 	}
 	defer pool.Close()
 
-	findings, totals, err := checkSQL(ctx, pool)
+	sqlFindings, totals, err := checkSQL(ctx, pool)
 	if err != nil {
 		return unverifiable(out, err)
 	}
-	findings = append(findings, checkDurability(totals, client), checkCellValidity(client, env))
+	// I7 is proved in SQL with I1..I4, but the public report stays numerically
+	// ordered: the two client-aware checks sit before it.
+	findings := make([]finding, 0, len(sqlFindings)+2)
+	for _, f := range sqlFindings {
+		if f.ID == "I7" {
+			findings = append(findings, checkDurability(totals, client), checkCellValidity(client, env))
+		}
+		findings = append(findings, f)
+	}
 
 	rep := summarize(run, findings)
 	render(out, rep)
