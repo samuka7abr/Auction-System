@@ -23,6 +23,7 @@ Cada etapa é quebrada em specs do tamanho de um PR, em `docs/specs/etapa-n/`:
 | [etapa-1/03-spec-carga-e-checker.md](../specs/etapa-1/03-spec-carga-e-checker.md) | Harness k6 com o apostador agressivo e a política de retentativa, `cmd/checker` com os invariantes, a célula reprodutível que a etapa 5 repete 36 vezes |
 | [etapa-2/01-spec-engine-pessimista.md](../specs/etapa-2/01-spec-engine-pessimista.md) | Engine pessimista em transação com `SELECT ... FOR UPDATE`, `lock_wait_duration_seconds` legível contra a confirmação, a segunda engine passando na suíte que já existe |
 | [etapa-2/02-spec-idempotencia.md](../specs/etapa-2/02-spec-idempotencia.md) | Middleware de idempotência sobre Redis acima do switch de estratégia, `X-Idempotency-Key` como fio do lance lógico, `idempotency_hits_total` e `bid_attempts_per_accept` medido pelo servidor |
+| [etapa-2/03-spec-duplicatas-e-invariantes.md](../specs/etapa-2/03-spec-duplicatas-e-invariantes.md) | Duplicatas injetadas no k6, replay contado sem duplicar aceite, I5 exato e I7 fechando a etapa 2 |
 
 As decisões de design da etapa 1 estão em [decisoes/etapa-1.md](../decisoes/etapa-1.md). Várias delas foram tomadas cedo de propósito: o contrato de durabilidade e o envelope uniforme de resposta precisam existir antes da primeira engine, ou as etapas 2 e 3 quebrariam a API que a etapa 1 publicou.
 

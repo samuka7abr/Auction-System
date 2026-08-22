@@ -226,3 +226,47 @@ Dois round-trips de Redis entram no caminho quente das três engines. Não entra
 **Sem `IDEMPOTENCY=on|off`:** ela já é desligável do lado certo, que é **não mandar o header**. Um lance sem chave não toca o Redis, então a célula de controle "sem idempotência" custa zero em configuração e vive no gerador de carga, onde as outras escolhas de cliente já vivem. Uma variável de ambiente seria um quinto eixo na matriz respondendo a uma pergunta que este projeto não fez.
 
 **Consequência de método:** o `docker compose` passa a limitar CPU e memória do Redis, e `bench/env.sh` passa a gravar esses limites junto dos outros três. O terceiro invariante de método pede recursos fixos e iguais, e o Redis acabou de entrar no caminho medido — um serviço sem limite num host carregado é uma variável escondida dentro de um número publicado.
+
+---
+
+## Decisões da spec 03
+
+Tomadas ao desenhar a [spec 03 da etapa 2](../specs/etapa-2/03-spec-duplicatas-e-invariantes.md), que demonstra a idempotência sob carga e fecha os dois invariantes adiados pela decisão 40.
+
+### 42. A coorte de duplicação é 10% dos lances lógicos, não 10% das requisições brutas
+
+Uma função determinística de `(__VU, __ITER)` seleciona uma em cada dez iterações antes de qualquer tentativa ou resposta. Metade da coorte recebe duplicata concorrente e metade recebe replay posterior.
+
+**Por quê:** o otimista produz mais requisições por lance por causa dos retries. Selecionar 10% das requisições já amplificadas faria a quantidade de duplicatas depender da engine, transformando o mecanismo medido em parâmetro do gerador. O lance lógico é a unidade estável e já é a unidade nomeada pela chave.
+
+**Emenda:** [provas.md](../projeto/provas.md) diz “10% das requisições”. Leia-se 10% dos lances lógicos, com `duplicatesSelected` e `duplicatesInjected` publicados para que a taxa efetiva nunca seja presumida.
+
+### 43. A duplicata é uma requisição extra, não uma tentativa do apostador
+
+`bids_attempts` e `client_attempts_per_accept` não contam a cópia injetada. Ela tem o contador próprio `duplicates_injected`. A duplicata concorrente usa `http.batch`, e o par de respostas é reduzido por semântica: `201` resolve, `425` não carrega estado e, entre rejeições, vence a maior `currentVersion`.
+
+**Por quê:** tentativa mede quantas vezes o apostador precisou re-mirar. Duplicata mede a perturbação controlada que exercita o middleware. Misturar as duas destruiria tanto a amplificação quanto a taxa de injeção. Se uma cópia escapar da janela de `busy` depois de uma rejeição e alcançar a engine, o histograma do servidor a conta — porque para o servidor ela foi, de fato, uma tentativa.
+
+### 44. `accepted` conta um lance lógico, e replay tem contador próprio
+
+O primeiro `201` observado sob uma chave incrementa `bids_accepted` uma vez, tenha ou não `X-Idempotency-Replayed: true`. Todo `201` com esse header também incrementa `bids_replayed`; respostas posteriores sob a mesma chave nunca incrementam `accepted` de novo.
+
+**Por quê:** a spec 02 passou a permitir dois `201` para uma linha — o fresco e o replay byte a byte. Contar respostas brutas faria o checker acusar write perdido exatamente quando a idempotência funcionou. Contar o fato lógico preserva a igualdade entre cliente, outcome da engine e banco.
+
+### 45. Erro de transporte retenta com a mesma chave; `503` não
+
+`status == 0` incrementa erro e `transport_retries`, aplica a política vigente e continua dentro de `MAX_RETRIES` e `BID_DEADLINE`, sem trocar a chave. Se o commit aconteceu, a tentativa seguinte recebe replay; se a requisição nunca chegou, recebe passagem.
+
+**Por quê:** o cliente não tem informação para distinguir as duas situações, e a chave existe justamente para resolver a ambiguidade sem adivinhação. `503` continua terminal: retentá-lo mudaria a carga durante uma falha de infraestrutura e pertence aos cenários de caos da etapa 4.
+
+### 46. I5 passa a exigir igualdade exata
+
+`count(bids) == client.accepted` e `max(seq) == client.maxSeqSeen`. Desigualdade em qualquer direção é `FAIL`; o aviso para banco à frente deixa de existir.
+
+**Por quê:** a tolerância da etapa 1 existia porque uma resposta durável podia sumir. O replay entregue na spec 02 e consumido nesta remove a justificativa. Banco atrás é write perdido; banco à frente é resposta ambígua não reconciliada ou contagem lógica errada. Nenhuma das duas células pode virar resultado publicado.
+
+### 47. I7 exige uma chave presente e distinta por linha
+
+O checker compara `count(*)`, `count(idempotency_key)` e `count(DISTINCT idempotency_key)`; os três precisam ser iguais.
+
+**Por quê:** o índice parcial já impede duas chaves não nulas iguais, mas não impede uma engine de esquecer a coluna e escrever `NULL`, que escapa do índice por definição. I7 prova a célula real em vez de apenas confiar no DDL. O teste planta uma chave nula e não remove a restrição para fabricar um estado impossível em produção.

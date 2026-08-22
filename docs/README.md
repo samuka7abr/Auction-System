@@ -80,7 +80,7 @@ docs/
 | Documento | Assunto |
 | --- | --- |
 | [decisoes/etapa-1.md](decisoes/etapa-1.md) | As 24 decisões de design da etapa 1, cada uma com a alternativa descartada. As de 19 a 24 emendam `estrategias.md` e `api.md` |
-| [decisoes/etapa-2.md](decisoes/etapa-2.md) | As decisões da etapa 2, numeradas a partir de 25. A 27 emenda a 22 para o caso transacional; as de 31 a 41 emendam `provas.md` e `observabilidade.md` |
+| [decisoes/etapa-2.md](decisoes/etapa-2.md) | As decisões da etapa 2, numeradas de 25 a 47. A 27 emenda a 22 para o caso transacional; as de 31 a 47 fecham idempotência, carga duplicada e os invariantes correspondentes |
 
 **`specs/` — o que construir**
 
@@ -91,6 +91,7 @@ docs/
 | [specs/etapa-1/03-spec-carga-e-checker.md](specs/etapa-1/03-spec-carga-e-checker.md) | Harness k6 com o apostador agressivo, `cmd/checker`, a célula de benchmark reprodutível |
 | [specs/etapa-2/01-spec-engine-pessimista.md](specs/etapa-2/01-spec-engine-pessimista.md) | Engine pessimista com `SELECT ... FOR UPDATE`, `lock_wait_duration_seconds`, a segunda curva do gráfico |
 | [specs/etapa-2/02-spec-idempotencia.md](specs/etapa-2/02-spec-idempotencia.md) | Middleware de idempotência sobre Redis, `X-Idempotency-Key`, `idempotency_hits_total`, `bid_attempts_per_accept` saindo do k6 para o servidor |
+| [specs/etapa-2/03-spec-duplicatas-e-invariantes.md](specs/etapa-2/03-spec-duplicatas-e-invariantes.md) | Duplicatas concorrentes e replay no k6, I5 exato e I7 provando chaves presentes e únicas |
 
 Modelo em [specs/spec-model.md](specs/spec-model.md).
 
