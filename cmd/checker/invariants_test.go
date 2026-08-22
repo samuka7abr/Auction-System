@@ -32,7 +32,7 @@ func TestSQLInvariantsPassOnACoherentCell(t *testing.T) {
 
 // A checker tested only against a correct database can be green by accident: a
 // wrong JOIN returns zero rows, and zero rows is exactly what it reads as
-// "invariant respected". These four cases are the ones that matter — without
+// "invariant respected". These five cases are the ones that matter — without
 // them the whole project would trust a verifier that never failed anything.
 func TestSQLInvariantsCatchPlantedViolations(t *testing.T) {
 	pg := testsupport.Start(t)
@@ -64,6 +64,10 @@ func TestSQLInvariantsCatchPlantedViolations(t *testing.T) {
 			target: "I4",
 			plant: []string{`UPDATE bids SET created_at = (SELECT ends_at FROM auctions) + interval '1 second'
 			                  WHERE seq = 1`},
+		},
+		{
+			target: "I7",
+			plant:  []string{`UPDATE bids SET idempotency_key = NULL WHERE seq = 1`},
 		},
 	}
 
@@ -115,8 +119,9 @@ func newCell(t *testing.T, pool *pgxpool.Pool, n int64) uuid.UUID {
 		auction, n*100, bidders[n-1], n)
 
 	for seq := int64(1); seq <= n; seq++ {
-		exec(t, pool, `INSERT INTO bids (id, auction_id, user_id, amount_cents, seq) VALUES ($1, $2, $3, $4, $5)`,
-			uuid.New(), auction, bidders[seq-1], seq*100, seq)
+		exec(t, pool, `INSERT INTO bids (id, auction_id, user_id, amount_cents, seq, idempotency_key)
+		               VALUES ($1, $2, $3, $4, $5, $6)`,
+			uuid.New(), auction, bidders[seq-1], seq*100, seq, uuid.New())
 	}
 	return auction
 }
