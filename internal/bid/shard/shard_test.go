@@ -21,7 +21,7 @@ const minIncrement = 100
 // in memory passes it or is wrong (decisão 11).
 func TestConformance(t *testing.T) {
 	enginetest.RunConformance(t, func(pool *pgxpool.Pool) bid.BidEngine {
-		return New(pool)
+		return New(pool, Observers{})
 	})
 }
 
@@ -30,7 +30,7 @@ func TestConformance(t *testing.T) {
 // true. This is the assertion that would catch it (decisão 8).
 func TestAcceptedBidIsVisibleBeforePlaceBidReturns(t *testing.T) {
 	pg := testsupport.Start(t)
-	engine := New(pg.Pool)
+	engine := New(pg.Pool, Observers{})
 	auction := seedAuction(t, pg.Pool, uuid.New(), time.Minute)
 
 	res, err := engine.PlaceBid(context.Background(), bid.BidRequest{
@@ -64,7 +64,7 @@ func TestAcceptedBidIsVisibleBeforePlaceBidReturns(t *testing.T) {
 // the same two requests are 409 and 400.
 func TestExpectedVersionIsIgnored(t *testing.T) {
 	pg := testsupport.Start(t)
-	engine := New(pg.Pool)
+	engine := New(pg.Pool, Observers{})
 
 	t.Run("stale version with enough amount is accepted", func(t *testing.T) {
 		auction := seedAuction(t, pg.Pool, uuid.New(), time.Minute)
@@ -110,7 +110,7 @@ func TestConcurrencyProducesNeitherConflictNorInvalid(t *testing.T) {
 	const workers, attempts = 8, 10
 
 	pg := testsupport.Start(t)
-	engine := New(pg.Pool)
+	engine := New(pg.Pool, Observers{})
 	auction := seedAuction(t, pg.Pool, uuid.New(), time.Minute)
 
 	outcomes := make(chan bid.Outcome, workers*attempts)
@@ -160,7 +160,7 @@ func TestBatchCommitsMoreThanOneBidAtOnce(t *testing.T) {
 	const n = 40
 
 	pg := testsupport.Start(t)
-	engine := New(pg.Pool)
+	engine := New(pg.Pool, Observers{})
 	auctions := sameShardAuctions(t, pg.Pool, n, 0)
 
 	// Warm up hydration for every auction with a first bid, exactly as
@@ -205,7 +205,7 @@ func TestBatchCommitsMoreThanOneBidAtOnce(t *testing.T) {
 // shard loses authority instead of lying (decisão 53).
 func TestSecondWriterAbortsCommitAndShardRecovers(t *testing.T) {
 	pg := testsupport.Start(t)
-	engine := New(pg.Pool)
+	engine := New(pg.Pool, Observers{})
 	auction := seedAuction(t, pg.Pool, uuid.New(), time.Minute)
 
 	first, err := engine.PlaceBid(context.Background(), bid.BidRequest{
@@ -266,7 +266,7 @@ func TestSecondWriterAbortsCommitAndShardRecovers(t *testing.T) {
 // path (decisão 49).
 func TestAuctionCreatedAfterBootIsHydrated(t *testing.T) {
 	pg := testsupport.Start(t)
-	engine := New(pg.Pool) // boot: no DB touched yet
+	engine := New(pg.Pool, Observers{}) // boot: no DB touched yet
 
 	auction := seedAuction(t, pg.Pool, uuid.New(), time.Minute) // created well after
 

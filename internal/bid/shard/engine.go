@@ -7,20 +7,23 @@
 // only writer of that auction's state. There is no lock to contend for, so
 // Postgres stops being the arbiter and becomes durability only.
 //
-// The package imports pgx, pgxpool and uuid, and nothing else the other two
-// engines don't already import — no Prometheus, no internal/metrics, no Gin, no
-// internal/app. The metrics this spec is measured by come from the decorator in
-// internal/app, wrapped around this engine exactly like the other two (decisão
-// 58): the mechanism this package adds — routing, ownership, batching, commit,
-// recovery — has no series of its own yet.
+// The package imports pgx, pgxpool, uuid and — since spec 02 — Prometheus, for
+// the Observer type alone, exactly as internal/bid/pessimistic already does
+// (decisão 67). It still does not import internal/metrics, internal/app or Gin:
+// the three series that describe this mechanism are named in internal/metrics
+// and reach the engine as three one-method interfaces, so no series name lives
+// here. What compares the three strategies keeps coming from the decorator in
+// internal/app, wrapped around this engine exactly like the other two.
 package shard
 
 import (
 	"context"
 	"hash/fnv"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/samuka7abr/bid-storm/internal/bid"
 )
@@ -29,6 +32,30 @@ import (
 // environment variables. A sweep of any of the three would be etapa 5 measuring
 // this engine's own tuning instead of the three strategies against each other.
 const numShards = 8
+
+// Observers is what internal/metrics hands this engine: three series it feeds
+// without ever learning their names. The zero value is a working engine that
+// publishes nothing, which is what the conformance suite and the boot test
+// build.
+type Observers struct {
+	Accept prometheus.Observer // bid_accept_duration_seconds
+	Lag    prometheus.Observer // journal_lag_seconds
+	Batch  prometheus.Observer // shard_batch_size
+}
+
+func (o Observers) orDiscard() Observers {
+	discard := prometheus.ObserverFunc(func(float64) {})
+	if o.Accept == nil {
+		o.Accept = discard
+	}
+	if o.Lag == nil {
+		o.Lag = discard
+	}
+	if o.Batch == nil {
+		o.Batch = discard
+	}
+	return o
+}
 
 // Engine owns numShards goroutines, each with exclusive access to a slice of
 // auctions. New starts them; they run for the life of the process.
@@ -41,10 +68,11 @@ type Engine struct {
 // auction it has not seen. That is what lets internal/app build this engine with
 // pool == nil in boot tests, without the failure landing on the wrong line
 // (decisão 49, RF02).
-func New(pool *pgxpool.Pool) *Engine {
+func New(pool *pgxpool.Pool, obs Observers) *Engine {
+	obs = obs.orDiscard()
 	e := &Engine{}
 	for i := range e.shards {
-		sh := newShard(pool)
+		sh := newShard(pool, obs)
 		e.shards[i] = sh
 		go sh.run()
 	}
@@ -61,7 +89,11 @@ func New(pool *pgxpool.Pool) *Engine {
 func (e *Engine) PlaceBid(ctx context.Context, req bid.BidRequest) (bid.BidResult, error) {
 	sh := e.shards[shardFor(req.AuctionID, numShards)]
 
-	cmd := &command{req: req, resp: make(chan cmdResult, 1)}
+	// Stamped before the enqueue, not after: the wait to enter the inbox is cost
+	// of the mechanism, and starting the clock inside the shard goroutine would
+	// measure the stretch nobody doubts is fast while hiding the one where the
+	// engine can choke (decisão 62).
+	cmd := &command{req: req, startedAt: time.Now(), resp: make(chan cmdResult, 1)}
 	select {
 	case sh.inbox <- cmd:
 	case <-ctx.Done():
@@ -70,6 +102,17 @@ func (e *Engine) PlaceBid(ctx context.Context, req bid.BidRequest) (bid.BidResul
 
 	r := <-cmd.resp
 	return r.res, r.err
+}
+
+// InboxDepths reports len(inbox) for every shard, in shard order, and is safe
+// to call from any goroutine: len over a channel is a read, and it is the whole
+// cost shard_inbox_depth charges — paid by the scrape, never by a bid.
+func (e *Engine) InboxDepths() []int {
+	depths := make([]int, len(e.shards))
+	for i, sh := range e.shards {
+		depths[i] = len(sh.inbox)
+	}
+	return depths
 }
 
 // shardFor is deterministic and pure: the same auction always lands on the same
