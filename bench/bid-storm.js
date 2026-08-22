@@ -31,7 +31,7 @@ const auctions = new SharedArray('auctions', () => JSON.parse(open('./auctions.j
 // land in http_req_failed and the rate<0.01 threshold would fail the very cell
 // the thesis is about, before the tenth request. 404, 400 and 503 stay
 // failures, and must: none of the three is an expected answer here.
-http.setResponseCallback(http.expectedStatuses(201, 409, 410, 422));
+http.setResponseCallback(http.expectedStatuses(201, 409, 410, 422, 425));
 
 const accepted = new Counter('bids_accepted');
 const conflict = new Counter('bids_conflict');
@@ -43,6 +43,11 @@ const errored = new Counter('bids_error');
 // optimistic engine's collapse made visible.
 const exhausted = new Counter('bids_exhausted');
 const attempts = new Counter('bids_attempts');
+const replayed = new Counter('bids_replayed');
+const inFlight = new Counter('bids_in_flight');
+const duplicatesSelected = new Counter('duplicates_selected');
+const duplicatesInjected = new Counter('duplicates_injected');
+const transportRetries = new Counter('transport_retries');
 
 // Distribution rather than a mean (decisão 16), and sampled only on accept:
 // mixing in the bidders that gave up would produce a number that is neither
@@ -134,7 +139,7 @@ function stateOf(auction) {
 }
 
 function absorb(state, body) {
-  if (body && typeof body.currentVersion === 'number') {
+  if (body && typeof body.currentVersion === 'number' && body.currentVersion >= state.currentVersion) {
     state.currentVersion = body.currentVersion;
     state.minNextBid = body.minNextBid;
   }
@@ -178,43 +183,54 @@ function bidKey() {
   return `${iter}-${vu}-4${NONCE.slice(0, 3)}-8${NONCE.slice(3, 6)}-${NONCE.slice(6)}`;
 }
 
-export default function () {
-  const auction = auctions[Math.floor(Math.random() * auctions.length)];
-  const state = stateOf(auction);
-  const url = `${BASE_URL}/auctions/${auction.id}/bids`;
-  const params = {
-    headers: {
-      'Content-Type': 'application/json',
-      'X-User-Id': userID(),
-      // Sent on every attempt of this logical bid, and never re-sent on purpose:
-      // injecting duplicates is spec 03. Here the header exists so the column,
-      // the metric and the middleware are exercised by the real load.
-      'X-Idempotency-Key': bidKey(),
-    },
-  };
-  const deadline = Date.now() + BID_DEADLINE;
+// One slot in every ten logical bids, offset by VU so a cell does not begin
+// with all VUs injecting at once. Consecutive selected slots alternate the two
+// demonstrations. Nothing about the response or the engine enters this choice.
+function duplicateMode() {
+  const logical = __ITER + __VU - 1;
+  if (logical % 10 !== 0) return '';
+  return Math.floor(logical / 10) % 2 === 0 ? 'concurrent' : 'replay';
+}
 
-  for (let attempt = 0; attempt < MAX_RETRIES && Date.now() < deadline; attempt++) {
-    attempts.add(1);
-    // The auction owns the increment (decisão 17); the client never invents a
-    // value, or two VUs would compete under different rules.
-    const body = JSON.stringify({ amountCents: state.minNextBid, expectedVersion: state.currentVersion });
-    const res = http.post(url, body, params);
+function isReplay(res) {
+  for (const name of Object.keys(res.headers || {})) {
+    if (name.toLowerCase() === 'x-idempotency-replayed') {
+      return String(res.headers[name]).toLowerCase() === 'true';
+    }
+  }
+  return false;
+}
 
+// A batch has no meaningful "original" response, so reduce by semantics. All
+// observed statuses keep their own counters, but any 201 wins the control-flow
+// decision. Without a 201, an unexpected terminal status wins over retryable
+// rejection, 425 or transport ambiguity.
+function reduceResponses(responses, state) {
+  let acceptedResponse = null;
+  let terminal = false;
+  let transports = 0;
+
+  for (const res of responses) {
     if (res.status === 201) {
-      const accept = res.json();
-      absorb(state, accept);
-      accepted.add(1);
-      seqSeen.add(accept.seq);
-      clientAttemptsPerAccept.add(attempt + 1);
-      confirmLatency.add(res.timings.duration);
-      return;
+      if (isReplay(res)) replayed.add(1);
+      if (acceptedResponse === null) acceptedResponse = res;
+      continue;
     }
 
     if (res.status === 409 || res.status === 422) {
       (res.status === 409 ? conflict : outbid).add(1);
       absorb(state, res.json());
-      sleep(backoff(attempt) / 1000);
+      continue;
+    }
+
+    if (res.status === 425) {
+      inFlight.add(1);
+      continue;
+    }
+
+    if (res.status === 0) {
+      errored.add(1);
+      transports++;
       continue;
     }
 
@@ -228,7 +244,72 @@ export default function () {
     } else {
       errored.add(1);
     }
-    return;
+    terminal = true;
+  }
+
+  if (acceptedResponse !== null) return { acceptedResponse };
+  if (transports > 0) transportRetries.add(transports);
+  return { terminal };
+}
+
+function demonstrateReplay(url, body, params, originalBody) {
+  duplicatesInjected.add(1);
+  const res = http.post(url, body, params);
+  const replay = res.status === 201 && isReplay(res);
+
+  if (replay) replayed.add(1);
+  if (res.status === 425) inFlight.add(1);
+  if (!replay || res.body !== originalBody) errored.add(1);
+}
+
+export default function () {
+  const auction = auctions[Math.floor(Math.random() * auctions.length)];
+  const state = stateOf(auction);
+  const url = `${BASE_URL}/auctions/${auction.id}/bids`;
+  const params = {
+    headers: {
+      'Content-Type': 'application/json',
+      'X-User-Id': userID(),
+      // Sent on every attempt and on the one optional duplicate of this logical
+      // bid. A retry may re-aim its body; the key still never changes.
+      'X-Idempotency-Key': bidKey(),
+    },
+  };
+  const mode = duplicateMode();
+  if (mode !== '') duplicatesSelected.add(1);
+  const deadline = Date.now() + BID_DEADLINE;
+
+  for (let attempt = 0; attempt < MAX_RETRIES && Date.now() < deadline; attempt++) {
+    attempts.add(1);
+    // The auction owns the increment (decisão 17); the client never invents a
+    // value, or two VUs would compete under different rules.
+    const body = JSON.stringify({ amountCents: state.minNextBid, expectedVersion: state.currentVersion });
+    let responses;
+    if (mode === 'concurrent' && attempt === 0) {
+      duplicatesInjected.add(1);
+      responses = http.batch([
+        ['POST', url, body, params],
+        ['POST', url, body, params],
+      ]);
+    } else {
+      responses = [http.post(url, body, params)];
+    }
+
+    const result = reduceResponses(responses, state);
+    if (result.acceptedResponse) {
+      const res = result.acceptedResponse;
+      const accept = res.json();
+      absorb(state, accept);
+      accepted.add(1);
+      seqSeen.add(accept.seq);
+      clientAttemptsPerAccept.add(attempt + 1);
+      confirmLatency.add(res.timings.duration);
+      if (mode === 'replay') demonstrateReplay(url, body, params, res.body);
+      return;
+    }
+
+    if (result.terminal) return;
+    sleep(backoff(attempt) / 1000);
   }
   exhausted.add(1);
 }
@@ -252,6 +333,11 @@ export function handleSummary(data) {
     error: count(data, 'bids_error'),
     exhausted: count(data, 'bids_exhausted'),
     attempts: count(data, 'bids_attempts'),
+    replayed: count(data, 'bids_replayed'),
+    inFlight: count(data, 'bids_in_flight'),
+    duplicatesSelected: count(data, 'duplicates_selected'),
+    duplicatesInjected: count(data, 'duplicates_injected'),
+    transportRetries: count(data, 'transport_retries'),
     maxSeqSeen: trend(data, 'seq_seen').max,
     confirmLatencyMs: trend(data, 'bid_confirm_latency'),
     clientAttemptsPerAccept: trend(data, 'client_attempts_per_accept'),
