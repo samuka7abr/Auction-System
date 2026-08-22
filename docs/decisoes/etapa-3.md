@@ -155,3 +155,105 @@ O envelope de `409`, `422` e `410` sai do estado em memória, que pode estar um 
 E há um motivo técnico para não empurrar `bid_accept_duration_seconds` para dentro desta spec. O gap entre aceite e confirmação só é legível se as duas séries observarem a mesma população, e não observam: `confirm` agrega todos os desfechos, e o custo de durabilidade só existe nos aceites. Sob contenção alta as rejeições dominam, os dois p95 caem na mesma população de rejeições e o gap lido no gráfico seria perto de zero — **subestimando o custo da durabilidade, a favor da tese do projeto**. O instrumento honesto é outro: um histograma por lance aceito, medido dentro do shard, da decisão até o commit. Ele resolve a mesma pergunta sem subtrair séries, e é ele que a spec 02 publica, junto de profundidade e tamanho de lote, onde a questão da população pode ser resolvida uma vez para as quatro.
 
 **Limite desta spec, então:** o argumento central do desenho — durabilidade custa isto aqui, e está exposto em vez de escondido no contrato — fica **afirmado e não medido** até a spec 02. O que esta spec prova sem série nova é o outro lado: que o lote existe e amortiza, contando transações em `pg_stat_database` antes e depois da célula.
+
+---
+
+## Decisões da spec 02
+
+Tomadas ao desenhar a [spec 02 da etapa 3](../specs/etapa-3/02-spec-metricas-do-shard.md), a instrumentação do mecanismo. Três delas **emendam** [observabilidade.md](../projeto/observabilidade.md) e uma emenda um requisito não funcional da spec 01. Onde houver divergência, vale o que está aqui.
+
+---
+
+### 59. `bid_accept_duration_seconds` não tem label `strategy`
+
+Emenda [observabilidade.md](../projeto/observabilidade.md), que declara a série como `bid_accept_duration_seconds{strategy}`.
+
+**Por quê:** nas outras duas engines o instante da decisão e o instante da durabilidade são o mesmo — a decisão acontece dentro do statement que a torna durável. Publicá-las nesta série seria publicar uma cópia de `bid_confirm_duration_seconds` com outro nome, e um leitor que comparasse as duas concluiria que o custo da durabilidade do otimista é zero, quando na verdade ele é indivisível.
+
+O precedente já está no projeto e é o de `lock_wait_duration_seconds` (decisão 28): um label com um valor só sugere que os outros dois reportam zero, quando eles não reportam nada — e **zero é uma afirmação diferente de silêncio**. A série entra sem label, e quem quiser saber de qual engine ela fala lê o nome das três irmãs ao lado dela, que começam com `shard_`.
+
+**A alternativa descartada** era manter o label e alimentá-lo nas três engines a partir do decorator, medindo "entrada até retorno da engine" — o que seria literalmente `confirm` de novo. Duas séries idênticas com nomes diferentes é pior que uma série a menos.
+
+---
+
+### 60. `journal_lag_seconds` vira histograma por lance aceito, e o nome fica
+
+Emenda [observabilidade.md](../projeto/observabilidade.md), que declara a série como `Gauge` — *"distância entre decidido e persistido"*.
+
+**Por quê o tipo muda:** o gauge foi desenhado imaginando um journal que acumula, com uma distância que dá para amostrar. Não é o que a engine faz. Com o commit síncrono da decisão 55, a janela entre decidido e durável é exatamente um lote, ou seja, algo entre centenas de microssegundos e poucos milissegundos. Um gauge lido a cada 5 segundos pelo Prometheus amostraria essa janela quase sempre fora dela, publicando zero, e nas raras vezes em que caísse dentro publicaria um número que não representa nada — ruído com aparência de série temporal.
+
+A pergunta que o gauge queria responder é boa, e um histograma **por lance aceito** a responde: da decisão em memória até o retorno do commit que a tornou durável. Toda a população é observada, não uma amostra por scrape, e o p95 passa a significar alguma coisa.
+
+**Por que o nome fica:** `journal_lag_seconds` já está publicado em `observabilidade.md`, e um nome num documento é contrato com quem lê. Renomear para algo mais coerente com os irmãos `shard_*` custaria um `grep` em três documentos e não muda nenhuma curva do gráfico — que é exatamente o filtro da regra de escopo. Muda o tipo, que é o que estava errado; fica o nome, que só estava feio.
+
+---
+
+### 61. Os dois histogramas novos usam os buckets do `confirm` como superconjunto
+
+`bid_accept_duration_seconds` e `journal_lag_seconds` recebem os buckets de `bid_confirm_duration_seconds` com seis fronteiras acrescentadas **abaixo** de 1ms: 10µs, 25µs, 50µs, 100µs, 250µs e 500µs.
+
+**Por quê:** a decisão 26 fixou que séries que precisam ser lidas uma contra a outra compartilham fronteiras, ou a comparação passa por interpolação de quantil — que é onde dez pontos percentuais se escondem. Foi por isso que `lock_wait_duration_seconds` copiou os buckets do `confirm`.
+
+Copiar literalmente aqui não funcionaria. O piso do `confirm` é 1ms porque ele mede fim a fim, e a decisão em memória do shard vive três ordens de grandeza abaixo disso: **tudo cairia no primeiro bucket** e o histograma diria apenas "menos de um milissegundo", que é a única coisa que já se sabia sem medir.
+
+O superconjunto preserva as duas regras ao mesmo tempo. Como toda fronteira do `confirm` continua existindo nas séries novas, a leitura bucket a bucket contra ele continua exata em todo ponto onde ele tem o que dizer; e abaixo de 1ms, onde ele não tem, as novas têm resolução própria. O custo é seis buckets a mais em duas séries sem label — vinte séries de contagem no `/metrics`, num processo que já publica o coletor do Go.
+
+---
+
+### 62. O relógio do aceite começa na entrada de `PlaceBid`; o do lag é local e nunca é o `created_at`
+
+`bid_accept_duration_seconds` conta da primeira linha de `PlaceBid` — **antes** do enfileiramento — até a decisão em memória. `journal_lag_seconds` conta de um instante local gravado na decisão até o retorno do commit.
+
+**Por que o aceite inclui a espera no inbox:** a espera para entrar é custo do mecanismo, não ruído antes dele. Começar a contar quando a goroutine do shard pega o comando mediria o trecho que ninguém duvida que é rápido e esconderia justamente o trecho onde a engine pode engasgar — e esse trecho é invisível no `shard_inbox_depth`, que é amostrado no scrape (decisão 63). O ponto de partida fica a uma chamada de função do ponto onde o decorator começa a contar o `confirm`, que é o mais perto que dá para chegar sem o pacote da engine importar o decorator.
+
+**Por que o lag não pode usar o `created_at`:** o `created_at` que o lote grava é o instante da decisão **corrigido pelo offset do banco** (decisões 50 e 51). Subtrair dele um `time.Now()` local não mede o custo do commit: mede o custo do commit somado ao offset entre dois relógios. Pior, seria silencioso — em Go, `time.Now().Add(d)` carrega a leitura monotônica junto, então `time.Since` sobre esse valor devolve um número plausível, errado por exatamente `skew`, e num compose com os dois contêineres na mesma máquina o erro é pequeno o bastante para nunca chamar atenção e grande o bastante para deslocar o p95 que a spec existe para publicar. A decisão guarda um campo local separado, e o `created_at` continua servindo só ao que a decisão 51 pediu dele.
+
+---
+
+### 63. `shard_inbox_depth` é amostrado no scrape, por um collector, e não atualizado a cada comando
+
+A série é produzida por um `prometheus.Collector` que, a cada raspagem, lê `len(inbox)` dos oito shards.
+
+**Por quê:** a alternativa é um `Gauge.Inc()` no envio e um `Gauge.Dec()` no recebimento. São duas escritas atômicas por lance no caminho quente da engine cuja tese inteira é que o caminho quente dela é barato — a medição financiaria o resultado, que é o pecado que os quatro invariantes de método existem para impedir. `len` sobre um canal é uma leitura, segura de qualquer goroutine, e o custo dela é pago pelo Prometheus a cada 5 segundos, não pelo lance.
+
+**Limite registrado, e ele é real:** um pico de backpressure mais curto que o intervalo de scrape é invisível nesta série. Ela não some do sistema por isso: o enfileiramento acontece **dentro** da fronteira do decorator (decisão 62), então esperar por um inbox cheio aparece em `bid_confirm_duration_seconds{strategy="shard"}` como latência, que é onde ela machuca e onde ela seria notada de qualquer jeito. O gauge existe para responder "quão perto do teto de 1024 isso chegou", e para essa pergunta uma amostra a cada 5 segundos ao longo de uma célula de dois minutos é suficiente — se as 24 amostras ficam em unidades, o teto de 1024 não é a história.
+
+---
+
+### 64. O gauge tem label por shard; o histograma do lote não tem label nenhum
+
+`shard_inbox_depth{shard="0".."7"}` e `shard_batch_size` sem label.
+
+**Por quê:** as duas séries respondem perguntas diferentes. A do gauge é *"a carga está distribuída, ou um shard virou gargalo?"* — e ela só existe se der para comparar um shard com o outro, o que exige o label. Oito gauges custam oito séries.
+
+A do histograma é *"quantos lances cabem num commit?"*, que é uma propriedade do mecanismo e não do número da goroutine. Com label, seriam oito histogramas de vinte buckets para responder o que um responde, e a primeira coisa que qualquer painel faria seria somar os oito de volta. Fica sem label, e o dia em que a pergunta "o shard 3 agrupa diferente?" aparecer, ela vem acompanhada de um motivo — e a resposta provável está no gauge, não aqui.
+
+---
+
+### 65. O tamanho do lote é observado uma vez por tentativa de commit, inclusive na que falha
+
+**Por quê:** o tamanho é propriedade do laço de acumulação, e o laço já terminou quando o statement roda. Condicionar a observação ao sucesso faria a série **desaparecer exatamente no incidente que alguém usaria a série para explicar** — o lote que abortou por violação de unicidade (decisão 53) é o caso em que se quer saber quantos lances foram derrubados junto, e é o único caso em que ela estaria muda.
+
+O par que conta esse acidente já existe e é `bid_outcomes_total{outcome="error"}`, então nada é perdido e nada é contado duas vezes. `journal_lag_seconds`, ao contrário, **só** é observado no commit bem-sucedido: um lote que abortou não tem instante de durabilidade, e inventar um seria publicar latência de uma coisa que não aconteceu.
+
+---
+
+### 66. A rejeição continua sem série própria
+
+Nenhuma das quatro séries mede quanto custa uma rejeição decidida em memória.
+
+**Por quê:** sob contenção alta, `bid_confirm_duration_seconds{strategy="shard"}` **já é** o histograma do custo da rejeição, porque a população dele é dominada por rejeições — é o outro lado exato do argumento da decisão 58, que descartou ler o custo da durabilidade por subtração pelo mesmo motivo. Publicar uma quinta série para reafirmar o que a curva do `confirm` já diz na célula de manchete é painel a mais sem pergunta a mais.
+
+**Onde a leitura não vale, e fica registrado:** na célula de 1000 leilões a população do `confirm` tem aceites demais para ele ser lido como custo de rejeição, e nenhuma série responde a pergunta ali. Fica como não feito porque a rejeição naquela célula é justamente o caso barato — sem round-trip, sem lock, sem retentativa — e medi-la com precisão não move nenhuma das três curvas do gráfico.
+
+---
+
+### 67. O pacote do shard passa a importar Prometheus, e recebe os observadores no construtor
+
+Emenda o requisito não funcional da [spec 01](../specs/etapa-3/01-spec-engine-single-writer.md) que dizia *"`internal/bid/shard` não importa Prometheus"*.
+
+**Por quê:** aquele requisito nunca foi uma regra de arquitetura, e sim a consequência de a spec 01 não publicar série nenhuma (decisão 58). Agora que publica, a forma correta já está definida pela decisão 28 e implementada na engine pessimista: a engine recebe `prometheus.Observer`, uma interface de um método, e **nunca aprende o nome da série que alimenta**. Todos os nomes continuam morando em `internal/metrics`, que é onde um revisor procura para saber o que o processo expõe.
+
+**A alternativa descartada** era declarar em `internal/bid/shard` uma interface local `interface{ Observe(float64) }` para evitar o import. Ela evita uma linha de import e cria duas convenções para a mesma coisa em duas engines irmãs — e a próxima pessoa a ler as duas gastaria mais tempo entendendo por que elas diferem do que o import jamais custou.
+
+O que **não** muda: o shard continua sem importar `internal/metrics`, `internal/app` e Gin, e continua sem saber que existe um decorator em volta dele.

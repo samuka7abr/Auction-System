@@ -25,6 +25,7 @@ Cada etapa é quebrada em specs do tamanho de um PR, em `docs/specs/etapa-n/`:
 | [etapa-2/02-spec-idempotencia.md](../specs/etapa-2/02-spec-idempotencia.md) | Middleware de idempotência sobre Redis acima do switch de estratégia, `X-Idempotency-Key` como fio do lance lógico, `idempotency_hits_total` e `bid_attempts_per_accept` medido pelo servidor |
 | [etapa-2/03-spec-duplicatas-e-invariantes.md](../specs/etapa-2/03-spec-duplicatas-e-invariantes.md) | Duplicatas injetadas no k6, replay contado sem duplicar aceite, I5 exato e I7 fechando a etapa 2 |
 | [etapa-3/01-spec-engine-single-writer.md](../specs/etapa-3/01-spec-engine-single-writer.md) | Shards com propriedade exclusiva do leilão, decisão em memória, commit em lote num statement, `201` só depois do commit, conformidade sem alterar a suíte |
+| [etapa-3/02-spec-metricas-do-shard.md](../specs/etapa-3/02-spec-metricas-do-shard.md) | As quatro séries do mecanismo single-writer, o custo da durabilidade medido por lance aceito em vez de subtraído, o tamanho do lote como distribuição e a profundidade do inbox lida no scrape |
 
 As decisões de design estão em [decisoes/etapa-1.md](../decisoes/etapa-1.md), [decisoes/etapa-2.md](../decisoes/etapa-2.md) e [decisoes/etapa-3.md](../decisoes/etapa-3.md). Várias delas foram tomadas cedo de propósito: o contrato de durabilidade e o envelope uniforme de resposta precisam existir antes da primeira engine, ou as etapas 2 e 3 quebrariam a API que a etapa 1 publicou.
 
