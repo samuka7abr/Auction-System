@@ -50,10 +50,15 @@ func NewEngine(strategy string, pool *pgxpool.Pool, reg prometheus.Registerer) (
 		// what describes this mechanism is measured from within (decisão 28).
 		engine = pessimistic.New(pool, metrics.NewLockWait(reg))
 	case StrategyShard:
-		// No lock observer, no series of its own here: this engine is not
-		// instrumented from the inside until spec 02 (decisão 58), so it is
-		// built and wrapped exactly like the optimistic engine above.
-		engine = shard.New(pool)
+		// Two calls and not one because the order forces it: the observers exist
+		// before the engine, and the engine exists before the collector that
+		// samples its inboxes at scrape time. Both happen against the registry
+		// and neither touches the pool, so booting still fails on the right line
+		// when Postgres is slow to come up.
+		accept, lag, batch := metrics.NewShard(reg)
+		sh := shard.New(pool, shard.Observers{Accept: accept, Lag: lag, Batch: batch})
+		metrics.RegisterShardInbox(reg, sh)
+		engine = sh
 	default:
 		return nil, fmt.Errorf("BID_STRATEGY=%q is not a strategy: want %s, %s or %s",
 			strategy, StrategyOptimistic, StrategyPessimistic, StrategyShard)

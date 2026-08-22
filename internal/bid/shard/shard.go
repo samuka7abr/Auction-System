@@ -35,8 +35,13 @@ const (
 // goroutine can always hand back an answer without blocking on a reader
 // (RF06).
 type command struct {
-	req  bid.BidRequest
-	resp chan cmdResult
+	req bid.BidRequest
+	// startedAt is stamped by PlaceBid before the enqueue: the clock of
+	// bid_accept_duration_seconds starts one function call away from where the
+	// decorator starts confirm's, which is as close as it gets without this
+	// package importing the decorator (decisão 62).
+	startedAt time.Time
+	resp      chan cmdResult
 }
 
 type cmdResult struct {
@@ -60,6 +65,11 @@ type pendingBid struct {
 	seq       int64
 	key       string
 	createdAt time.Time
+	// decidedAt is a plain local instant, never createdAt: that one is the
+	// decision corrected by the database offset (decisões 50 and 51), and
+	// time.Since over it would return the commit plus the skew between two
+	// clocks — plausible, silent, and wrong by exactly that much (decisão 62).
+	decidedAt time.Time
 	current   bid.AuctionState // snapshot for the eventual 201's Current
 }
 
@@ -70,13 +80,15 @@ type shard struct {
 	pool     *pgxpool.Pool
 	inbox    chan *command
 	auctions map[uuid.UUID]*auctionState
+	obs      Observers
 }
 
-func newShard(pool *pgxpool.Pool) *shard {
+func newShard(pool *pgxpool.Pool, obs Observers) *shard {
 	return &shard{
 		pool:     pool,
 		inbox:    make(chan *command, inboxCap),
 		auctions: make(map[uuid.UUID]*auctionState),
+		obs:      obs,
 	}
 }
 
@@ -157,6 +169,12 @@ func (s *shard) decide(cmd *command) *pendingBid {
 	st.HighestBidCents = req.AmountCents
 	st.highestBidder = req.UserID
 
+	// Only the accept is observed. A rejection has no series of its own
+	// (decisão 66), and neither NotFound nor an infrastructure failure is a
+	// decision this histogram is asked about.
+	decidedAt := time.Now()
+	s.obs.Accept.Observe(decidedAt.Sub(cmd.startedAt).Seconds())
+
 	return &pendingBid{
 		cmd:       cmd,
 		bidID:     uuid.New(),
@@ -166,6 +184,7 @@ func (s *shard) decide(cmd *command) *pendingBid {
 		seq:       st.Version,
 		key:       req.IdempotencyKey,
 		createdAt: st.now(),
+		decidedAt: decidedAt,
 		current:   st.AuctionState,
 	}
 }
@@ -197,6 +216,12 @@ func (s *shard) commit(batch []*pendingBid) {
 		upAuctions[i], upAmounts[i], upBidders[i], upVersions[i] = p.auctionID, p.amount, p.userID, p.seq
 	}
 
+	// Observed before the statement and regardless of its outcome: the size is a
+	// property of the accumulation loop, which has already finished. Making it
+	// conditional on success would silence the series exactly in the incident
+	// someone would use it to explain — the batch that aborted (decisão 65).
+	s.obs.Batch.Observe(float64(len(batch)))
+
 	ctx, cancel := context.WithTimeout(context.Background(), commitTimeout)
 	defer cancel()
 
@@ -216,6 +241,9 @@ func (s *shard) commit(batch []*pendingBid) {
 	}
 
 	for _, p := range batch {
+		// The lag, unlike the batch size, only exists here: a batch that aborted
+		// has no instant of durability to measure to (decisão 65).
+		s.obs.Lag.Observe(time.Since(p.decidedAt).Seconds())
 		p.cmd.reply(bid.BidResult{
 			Outcome: bid.Accepted,
 			Seq:     p.seq,
