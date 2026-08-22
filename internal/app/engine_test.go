@@ -9,7 +9,7 @@ import (
 )
 
 func TestNewEngineBuildsTheImplementedStrategies(t *testing.T) {
-	for _, strategy := range []string{app.StrategyOptimistic, app.StrategyPessimistic} {
+	for _, strategy := range []string{app.StrategyOptimistic, app.StrategyPessimistic, app.StrategyShard} {
 		t.Run(strategy, func(t *testing.T) {
 			// No pool is dialled here: selecting an engine must not touch the
 			// database, or the boot would fail for the wrong reason when Postgres
@@ -34,7 +34,6 @@ func TestNewEngineRefusesWhatDoesNotExistYet(t *testing.T) {
 		strategy string
 		wantIn   string
 	}{
-		{app.StrategyShard, "etapa 3"},
 		{"optimistc", "is not a strategy"},
 		{"", "is not a strategy"},
 	}

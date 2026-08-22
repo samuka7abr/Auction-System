@@ -81,6 +81,7 @@ docs/
 | --- | --- |
 | [decisoes/etapa-1.md](decisoes/etapa-1.md) | As 24 decisões de design da etapa 1, cada uma com a alternativa descartada. As de 19 a 24 emendam `estrategias.md` e `api.md` |
 | [decisoes/etapa-2.md](decisoes/etapa-2.md) | As decisões da etapa 2, numeradas de 25 a 47. A 27 emenda a 22 para o caso transacional; as de 31 a 47 fecham idempotência, carga duplicada e os invariantes correspondentes |
+| [decisoes/etapa-3.md](decisoes/etapa-3.md) | As decisões da etapa 3, a partir da 48. A 48 e a 52 emendam `estrategias.md` sobre o lote do shard; a 58 emenda a 16 por uma spec |
 
 **`specs/` — o que construir**
 
@@ -92,6 +93,7 @@ docs/
 | [specs/etapa-2/01-spec-engine-pessimista.md](specs/etapa-2/01-spec-engine-pessimista.md) | Engine pessimista com `SELECT ... FOR UPDATE`, `lock_wait_duration_seconds`, a segunda curva do gráfico |
 | [specs/etapa-2/02-spec-idempotencia.md](specs/etapa-2/02-spec-idempotencia.md) | Middleware de idempotência sobre Redis, `X-Idempotency-Key`, `idempotency_hits_total`, `bid_attempts_per_accept` saindo do k6 para o servidor |
 | [specs/etapa-2/03-spec-duplicatas-e-invariantes.md](specs/etapa-2/03-spec-duplicatas-e-invariantes.md) | Duplicatas concorrentes e replay no k6, I5 exato e I7 provando chaves presentes e únicas |
+| [specs/etapa-3/01-spec-engine-single-writer.md](specs/etapa-3/01-spec-engine-single-writer.md) | Engine single-writer com shards, decisão em memória e commit em lote, passando na suíte que já existe |
 
 Modelo em [specs/spec-model.md](specs/spec-model.md).
 
