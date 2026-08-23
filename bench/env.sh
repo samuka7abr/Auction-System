@@ -3,7 +3,9 @@
 #
 # Redis is in here from etapa 2 on: the idempotency middleware put it in the hot
 # path of the three engines, and a service with no limit on a loaded host is a
-# hidden variable inside a published number.
+# hidden variable inside a published number. The closerd joins them in etapa 4
+# for the same reason: it shares the machine with the benchmark in every cell,
+# so it goes into env.json or it becomes a hidden variable (decisão 80).
 #
 # The limits come from `docker inspect` and not from the YAML, for the same
 # reason as C1 of spec 01: a limit the Compose silently ignored is not a limit,
@@ -53,6 +55,7 @@ jq -n \
   --argjson hostMemory "$(awk '/MemTotal/ { print $2 * 1024 }' /proc/meminfo)" \
   --arg pgImage "$(image_of postgres)" \
   --arg auctiondImage "$(image_of auctiond)" \
+  --arg closerdImage "$(image_of closerd)" \
   --arg k6Image "${K6_IMAGE:-}" \
   --arg pgVersion "$(docker compose exec -T postgres postgres --version 2> /dev/null | tr -d '\r' || echo unknown)" \
   --arg goVersion "$(go version)" \
@@ -60,6 +63,7 @@ jq -n \
   --argjson auctiondLimits "$(limits_of auctiond)" \
   --argjson postgresLimits "$(limits_of postgres)" \
   --argjson redisLimits "$(limits_of redis)" \
+  --argjson closerdLimits "$(limits_of closerd)" \
   --argjson k6Cpus "${K6_CPUS:-0}" \
   --argjson k6Memory "${K6_MEM_BYTES:-0}" \
   --argjson cpuPctPeak "${GENERATOR_CPU_PCT_PEAK:-0}" \
@@ -71,10 +75,11 @@ jq -n \
     cell: {strategy: $strategy, auctions: $auctions, policy: $policy,
            scenario: $scenario, poolSize: $poolSize},
     host: {kernel: $kernel, cpus: $hostCpus, memoryBytes: $hostMemory},
-    images: {postgres: $pgImage, auctiond: $auctiondImage, k6: $k6Image},
+    images: {postgres: $pgImage, auctiond: $auctiondImage, closerd: $closerdImage,
+             k6: $k6Image},
     versions: {postgres: $pgVersion, go: $goVersion, k6: $k6Version},
     limits: {auctiond: $auctiondLimits, postgres: $postgresLimits,
-             redis: $redisLimits,
+             redis: $redisLimits, closerd: $closerdLimits,
              k6: {cpus: $k6Cpus, memoryBytes: $k6Memory}},
     generator: {cpuPctPeak: $cpuPctPeak, saturated: ($cpuPctPeak > 90)}
   }'
