@@ -107,7 +107,11 @@ func readFile(path string, into any) error {
 // checkDurability is I5. Idempotent transport recovery removes the etapa 1
 // asymmetry: the durable history and the logical acceptances must now agree in
 // both count and watermark (decisão 46).
-func checkDurability(db cellTotals, c clientReport) finding {
+//
+// Under chaos the asymmetry comes back, and only in the safe direction: see
+// aheadUnderChaos. The other direction — a confirmed bid the database does not
+// have — is the failure this whole harness exists for, and it does not move.
+func checkDurability(db cellTotals, c clientReport, chaos *chaosReport) finding {
 	f := finding{ID: "I5", Name: "durabilidade db x cliente", Verdict: verdictOK}
 	accepted, maxSeq := *c.Accepted, *c.MaxSeqSeen
 
@@ -116,7 +120,7 @@ func checkDurability(db cellTotals, c clientReport) finding {
 		f.Verdict = verdictFail
 		f.Detail = fmt.Sprintf("LANCE CONFIRMADO SUMIU: db=%d cliente=%d", db.Bids, accepted)
 	case db.Bids > accepted:
-		f.Verdict = verdictFail
+		f.Verdict = aheadUnderChaos(chaos)
 		f.Detail = fmt.Sprintf("BANCO À FRENTE: db=%d cliente=%d", db.Bids, accepted)
 	default:
 		f.Detail = fmt.Sprintf("db=%d cliente=%d", db.Bids, accepted)
@@ -126,11 +130,32 @@ func checkDurability(db cellTotals, c clientReport) finding {
 	// in any auction. Together with I1's density it subsumes the per-auction
 	// attribution — a durable 201 cannot vanish without either dropping the count
 	// below the client's or opening a hole in some auction's sequence.
-	if db.MaxSeq != maxSeq {
-		f.Verdict = verdictFail
+	//
+	// It is read by direction for the same reason the counts are: a database
+	// behind the client is a lost write whatever killed the process.
+	switch {
+	case db.MaxSeq < maxSeq:
+		f.Verdict = worse(f.Verdict, verdictFail)
+		f.Detail += fmt.Sprintf(" · watermark divergente: db=%d cliente=%d", db.MaxSeq, maxSeq)
+	case db.MaxSeq > maxSeq:
+		f.Verdict = worse(f.Verdict, aheadUnderChaos(chaos))
 		f.Detail += fmt.Sprintf(" · watermark divergente: db=%d cliente=%d", db.MaxSeq, maxSeq)
 	}
 	return f
+}
+
+// aheadUnderChaos is half of decisão 85: the database holding more than the
+// client counted is a 201 whose commit outran its own response, and killing the
+// process that would have answered is exactly how that happens — the mark in
+// Redis expires with no owner and the stored response is lost for good.
+//
+// Outside chaos there is no such excuse and it stays a failure: idempotent
+// transport recovery is supposed to make every durable write observable.
+func aheadUnderChaos(chaos *chaosReport) verdict {
+	if chaos != nil {
+		return verdictWarn
+	}
+	return verdictFail
 }
 
 // The share of requests that may fail for real before the cell stops being a
@@ -140,7 +165,14 @@ const maxErrorRate = 0.01
 
 // checkCellValidity is I6: it does not judge the engine, it judges whether this
 // cell is worth reading at all.
-func checkCellValidity(c clientReport, e envReport) finding {
+//
+// It is the only check chaos turns around, and in both directions at once
+// (decisão 85): the error rate stops failing the cell, because under an
+// injected failure the error IS the injection and failing on it would be
+// failing the experiment; and an injection that never landed starts failing it,
+// because a chaos cell that broke nothing is the worst result available — it
+// looks like proof and is not (decisões 59 and 84).
+func checkCellValidity(c clientReport, e envReport, chaos *chaosReport) finding {
 	f := finding{ID: "I6", Name: "célula válida", Verdict: verdictOK}
 	var fails, warns []string
 
@@ -193,7 +225,14 @@ func checkCellValidity(c clientReport, e envReport) finding {
 		rate = float64(errs) / float64(attempts)
 	}
 	if rate >= maxErrorRate {
-		fails = append(fails, fmt.Sprintf("erro=%s acima de %.0f%%: infra caindo", percent(rate), maxErrorRate*100))
+		if chaos == nil {
+			fails = append(fails, fmt.Sprintf("erro=%s acima de %.0f%%: infra caindo", percent(rate), maxErrorRate*100))
+		} else {
+			warns = append(warns, fmt.Sprintf("erro=%s: é a injeção de %s", percent(rate), chaos.Scenario))
+		}
+	}
+	if chaos != nil && !chaos.Landed {
+		fails = append(fails, fmt.Sprintf("caos %s não aterrissou: a célula não prova nada", chaos.Scenario))
 	}
 	if *e.Generator.Saturated {
 		// A warning and not a failure: discarding the cell is the reader's call.
@@ -201,15 +240,20 @@ func checkCellValidity(c clientReport, e envReport) finding {
 		// generator's rather than auctiond's.
 		warns = append(warns, fmt.Sprintf("gerador=%.0f%% do limite: a célula pode ter medido o gerador", *e.Generator.CPUPctPeak))
 	}
-	if closed > 0 {
+	if closed > 0 && chaos == nil {
 		// Nothing should close during a cell of this etapa: an auction dying
 		// mid-cell mixes contention with the closing edge in one number, and the
-		// edge deserves a cell of its own (etapa 5).
+		// edge deserves a cell of its own (etapa 5). Under chaos the auctions
+		// expiring mid-load are the point of the closerd scenario, so the number
+		// goes to the evidence line below instead of to the warnings.
 		warns = append(warns, fmt.Sprintf("closed=%d: ENDS_IN curto demais", closed))
 	}
 
 	evidence := fmt.Sprintf("replayed=%d in_flight=%d selecionadas=%d injetadas=%d",
 		replayed, inFlight, selected, injected)
+	if chaos != nil {
+		evidence += fmt.Sprintf(" · caos=%s erro=%s closed=%d", chaos.Scenario, percent(rate), closed)
+	}
 
 	switch {
 	case len(fails) > 0:
