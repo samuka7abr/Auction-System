@@ -27,8 +27,9 @@ Cada etapa é quebrada em specs do tamanho de um PR, em `docs/specs/etapa-n/`:
 | [etapa-3/01-spec-engine-single-writer.md](../specs/etapa-3/01-spec-engine-single-writer.md) | Shards com propriedade exclusiva do leilão, decisão em memória, commit em lote num statement, `201` só depois do commit, conformidade sem alterar a suíte |
 | [etapa-3/02-spec-metricas-do-shard.md](../specs/etapa-3/02-spec-metricas-do-shard.md) | As quatro séries do mecanismo single-writer, o custo da durabilidade medido por lance aceito em vez de subtraído, o tamanho do lote como distribuição e a profundidade do inbox lida no scrape |
 | [etapa-4/01-spec-fechamento-e-closerd.md](../specs/etapa-4/01-spec-fechamento-e-closerd.md) | Varredor de vencidos publicando no Redis Stream, `closerd` materializando `status` e `closed_at` com as duas guardas que o impedem de fechar cedo ou duas vezes, a fila medida no produtor em duas séries, e I8 |
+| [etapa-4/02-spec-caos.md](../specs/etapa-4/02-spec-caos.md) | Injetor de falhas por fora dos processos, os quatro cenários da tabela de caos sob carga real, `chaos.json` provando que a injeção aterrissou, e o verificador aprendendo a diferença entre célula quebrada de propósito e célula que não vale |
 
-As decisões de design estão em [decisoes/etapa-1.md](../decisoes/etapa-1.md), [decisoes/etapa-2.md](../decisoes/etapa-2.md) e [decisoes/etapa-3.md](../decisoes/etapa-3.md). Várias delas foram tomadas cedo de propósito: o contrato de durabilidade e o envelope uniforme de resposta precisam existir antes da primeira engine, ou as etapas 2 e 3 quebrariam a API que a etapa 1 publicou.
+As decisões de design estão em [decisoes/etapa-1.md](../decisoes/etapa-1.md), [decisoes/etapa-2.md](../decisoes/etapa-2.md), [decisoes/etapa-3.md](../decisoes/etapa-3.md) e [decisoes/etapa-4.md](../decisoes/etapa-4.md). Várias delas foram tomadas cedo de propósito: o contrato de durabilidade e o envelope uniforme de resposta precisam existir antes da primeira engine, ou as etapas 2 e 3 quebrariam a API que a etapa 1 publicou.
 
 ---
 
