@@ -18,11 +18,13 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/samuka7abr/bid-storm/internal/app"
+	"github.com/samuka7abr/bid-storm/internal/closing"
 	"github.com/samuka7abr/bid-storm/internal/config"
 	"github.com/samuka7abr/bid-storm/internal/db"
 	"github.com/samuka7abr/bid-storm/internal/httpapi"
 	"github.com/samuka7abr/bid-storm/internal/metrics"
 	"github.com/samuka7abr/bid-storm/internal/store"
+	"github.com/samuka7abr/bid-storm/internal/stream"
 )
 
 const shutdownGrace = 10 * time.Second
@@ -88,6 +90,27 @@ func run(log *slog.Logger) error {
 	registry := metrics.NewRegistry()
 	metrics.RegisterPool(registry, pool)
 
+	// The closing path of etapa 4, and the whole of what this process pays for
+	// it: a producer fed by a sweep, never by a bid. No engine publishes
+	// anything and no XADD reaches PlaceBid — an XADD in the hot path would make
+	// bid_confirm_duration_seconds measure Redis exactly at the ends_at edge,
+	// which is the entire scenario of this project (decisão 69).
+	producer := stream.NewProducer(rdb, metrics.NewStream(registry))
+
+	// The producer creates the group, at boot, before the first publication: a
+	// group created by the consumer would leave everything published before the
+	// worker booted invisible to it, and would leave the two gauges below with
+	// nothing to read (decisão 72). Failing here aborts the boot for the same
+	// reason an unreachable Redis does — an auctiond publishing into the void
+	// goes unnoticed until the end of the cell.
+	if err := producer.EnsureGroup(ctx); err != nil {
+		return err
+	}
+
+	// Both queue gauges are published here, by the process that stays alive
+	// during the four failure scenarios (decisão 73).
+	metrics.RegisterStreamGroup(registry, producer)
+
 	// A strategy with no engine behind it aborts the boot instead of serving a
 	// whole benchmark cell's worth of 503s.
 	engine, err := app.NewEngine(cfg.BidStrategy, pool, registry)
@@ -119,6 +142,10 @@ func run(log *slog.Logger) error {
 			Log:         log,
 		}),
 	}
+
+	// One query per second, off the hot path, ended by the same signal context
+	// as the server.
+	go closing.NewExpirer(pool, producer, log).Run(ctx)
 
 	serveErr := make(chan error, 1)
 	go func() {
