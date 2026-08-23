@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/google/uuid"
@@ -22,6 +23,29 @@ func TestSQLInvariantsPassOnACoherentCell(t *testing.T) {
 	}
 	if totals.Auctions != 1 || totals.Bids != cellBids || totals.MaxSeq != cellBids {
 		t.Fatalf("totals = %+v, want 1 auction and %d bids", totals, cellBids)
+	}
+	for _, f := range findings {
+		if f.Verdict != verdictOK {
+			t.Errorf("%s = %s (%s), want OK", f.ID, f.Verdict, f.Detail)
+		}
+	}
+}
+
+// The green side of I8: a coherently closed auction passes, and the summary
+// reports how many the cell closed. Closing it a second after ends_at keeps I4
+// green too, which is what makes the pair say created_at <= closed_at for free.
+func TestI8AcceptsACoherentlyClosedAuction(t *testing.T) {
+	pg := testsupport.Start(t)
+	newCell(t, pg.Pool, cellBids)
+	exec(t, pg.Pool, `UPDATE auctions
+	                     SET status = 'closed', closed_at = ends_at + interval '1 second'`)
+
+	findings, totals, err := checkSQL(context.Background(), pg.Pool)
+	if err != nil {
+		t.Fatalf("checkSQL: %v", err)
+	}
+	if totals.ClosedAuctions != 1 {
+		t.Errorf("ClosedAuctions = %d, want 1", totals.ClosedAuctions)
 	}
 	for _, f := range findings {
 		if f.Verdict != verdictOK {
@@ -69,10 +93,30 @@ func TestSQLInvariantsCatchPlantedViolations(t *testing.T) {
 			target: "I7",
 			plant:  []string{`UPDATE bids SET idempotency_key = NULL WHERE seq = 1`},
 		},
+		{
+			// The two columns disagreeing, in each direction. Whatever wrote one
+			// without the other is not the closerd — its UPDATE writes both in
+			// one statement — which is exactly why the checker looks.
+			target: "I8",
+			plant:  []string{`UPDATE auctions SET status = 'closed'`},
+		},
+		{
+			target: "I8",
+			plant:  []string{`UPDATE auctions SET closed_at = now()`},
+		},
+		{
+			// Closed before its time, which is the one error worse than a late
+			// bid: it refuses a legitimate one. The guard ends_at <=
+			// clock_timestamp() is what makes it impossible, and this is where
+			// the checker confirms it stayed impossible.
+			target: "I8",
+			plant: []string{`UPDATE auctions SET status = 'closed',
+			                       closed_at = ends_at - interval '1 second'`},
+		},
 	}
 
-	for _, tc := range cases {
-		t.Run(tc.target, func(t *testing.T) {
+	for i, tc := range cases {
+		t.Run(fmt.Sprintf("%s/%d", tc.target, i), func(t *testing.T) {
 			newCell(t, pg.Pool, cellBids)
 			for _, stmt := range tc.plant {
 				exec(t, pg.Pool, stmt)

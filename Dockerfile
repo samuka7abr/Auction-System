@@ -9,11 +9,16 @@ RUN go mod download
 
 COPY cmd ./cmd
 COPY internal ./internal
-RUN CGO_ENABLED=0 go build -trimpath -o /out/auctiond ./cmd/auctiond
+# Two binaries out of one build stage: one image, one module download, two
+# processes. The closerd shares every dependency the auctiond already has.
+RUN CGO_ENABLED=0 go build -trimpath -o /out/auctiond ./cmd/auctiond \
+ && CGO_ENABLED=0 go build -trimpath -o /out/closerd ./cmd/closerd
 
 FROM alpine:3.20
 RUN adduser -D -u 10001 auction
 USER auction
 COPY --from=build /out/auctiond /usr/local/bin/auctiond
-EXPOSE 8080
+COPY --from=build /out/closerd /usr/local/bin/closerd
+EXPOSE 8080 8081
+# The default is the API; the closerd service overrides the entrypoint.
 ENTRYPOINT ["/usr/local/bin/auctiond"]

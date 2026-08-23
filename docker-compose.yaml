@@ -94,6 +94,35 @@ services:
           cpus: '2.0'
           memory: 1G
 
+  # The second long-lived process of the project, and the one the chaos scenario
+  # of spec 02 kills. No `profiles`: a closerd that only came up in some runs
+  # would make two cells of the same matrix measure different systems, and it
+  # costs almost nothing with nothing to close — it sits blocked on XREADGROUP.
+  # Half a CPU and 256M because it is a sequential consumer doing one UPDATE at a
+  # time; the limit is there so it cannot compete with auctiond in a spike, not
+  # because it needs the ceiling (decisão 80). bench/env.sh records both.
+  closerd:
+    build:
+      context: .
+    entrypoint: /usr/local/bin/closerd
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "${CLOSERD_PORT:-8081}:8081"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    cpus: 0.5
+    mem_limit: 256M
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+
   # Never on the host, for the same reason auctiond is not: a load generator
   # without a resource limit has no limit at all, and when it saturates the
   # queue forms in the client while the client's clock is already running — the

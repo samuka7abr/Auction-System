@@ -6,3 +6,10 @@ scrape_configs:
   - job_name: auctiond
     static_configs:
       - targets: ['auctiond:8080']
+
+  # A second job, and not a second target of the first: killing the closerd has
+  # to drop one target and leave the other standing, so that the outage is
+  # recorded as up{job="closerd"} 0 — a datum, not a hole (decisão 74).
+  - job_name: closerd
+    static_configs:
+      - targets: ['closerd:8081']

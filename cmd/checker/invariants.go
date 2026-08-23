@@ -16,10 +16,12 @@ type cellTotals struct {
 	MaxSeq          int64
 	BidsWithKey     int64
 	DistinctBidKeys int64
+	ClosedAuctions  int64
 }
 
 const totalsSQL = `SELECT count(DISTINCT auction_id), count(*), coalesce(max(seq), 0),
-                          count(idempotency_key), count(DISTINCT idempotency_key)
+                          count(idempotency_key), count(DISTINCT idempotency_key),
+                          (SELECT count(*) FROM auctions WHERE status = 'closed')
                      FROM bids`
 
 // Every SQL invariant is a query that returns no row when the invariant holds,
@@ -136,9 +138,39 @@ var sqlInvariants = []sqlInvariant{
 				t.Bids, t.BidsWithKey, t.DistinctBidKeys)
 		},
 	},
+	{
+		id:   "I8",
+		name: "fechamento coerente",
+		// Coherence, and deliberately not convergence. The invariant one wants
+		// to write — every auction past ends_at has status = 'closed' — is false
+		// while the closerd is dead, and killing the closerd is a test scenario
+		// of this same stage: a verifier that fails the cell because of the
+		// failure the cell is injecting on purpose gets switched off, and from
+		// then on proves nothing anywhere (decisão 79). Convergence is measured
+		// instead, by auction_close_lag_seconds and stream_backlog_entries.
+		//
+		// What this proves holds with the worker alive or dead: the two columns
+		// never disagree, and nothing was closed before its time. It is the
+		// exact pair of the guard in the UPDATE — what the WHERE makes
+		// impossible, this checks stayed impossible.
+		//
+		// Chained with I4 it also gives created_at <= closed_at for free — no
+		// bid entered after the auction was closed — with no third query.
+		query: `
+			SELECT format('leilão %s: status %s, closed_at %s, ends_at %s',
+			              id, status, coalesce(closed_at::text, 'null'), ends_at)
+			  FROM auctions
+			 WHERE (status = 'closed') <> (closed_at IS NOT NULL)
+			    OR (closed_at IS NOT NULL AND closed_at < ends_at)
+			 ORDER BY id
+			 LIMIT 5`,
+		summary: func(t cellTotals) string {
+			return plural64(t.ClosedAuctions, "leilão fechado", "leilões fechados")
+		},
+	},
 }
 
-// checkSQL runs the five invariants Postgres can prove on its own.
+// checkSQL runs the six invariants Postgres can prove on its own.
 //
 // A violation never stops the others: the cell's report has to say everything
 // that is wrong at once. A query that errors does stop them, because it means
@@ -146,7 +178,8 @@ var sqlInvariants = []sqlInvariant{
 func checkSQL(ctx context.Context, pool *pgxpool.Pool) ([]finding, cellTotals, error) {
 	var totals cellTotals
 	if err := pool.QueryRow(ctx, totalsSQL).Scan(
-		&totals.Auctions, &totals.Bids, &totals.MaxSeq, &totals.BidsWithKey, &totals.DistinctBidKeys,
+		&totals.Auctions, &totals.Bids, &totals.MaxSeq, &totals.BidsWithKey,
+		&totals.DistinctBidKeys, &totals.ClosedAuctions,
 	); err != nil {
 		return nil, totals, fmt.Errorf("count the cell: %w", err)
 	}
