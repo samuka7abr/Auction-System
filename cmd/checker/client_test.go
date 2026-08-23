@@ -28,7 +28,38 @@ func TestDurabilityReadsTheThreeWaysTheCountsCanDiffer(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := checkDurability(tc.db, baseClient()); got.Verdict != tc.want {
+			if got := checkDurability(tc.db, baseClient(), nil); got.Verdict != tc.want {
+				t.Errorf("verdict = %s (%s), want %s", got.Verdict, got.Detail, tc.want)
+			}
+		})
+	}
+}
+
+// The six directions of decisão 85, and the two that do not soften are the
+// reason the table exists: killing the process that would have answered
+// explains a database ahead of the client, and explains nothing at all about a
+// confirmed bid the database does not have.
+func TestDurabilityUnderChaosLoosensOnlyTheSafeDirection(t *testing.T) {
+	cases := []struct {
+		name string
+		db   cellTotals
+		want verdict
+	}{
+		{"equal", cellTotals{Bids: 100, MaxSeq: 100}, verdictOK},
+		// The 201 was written and the response died with the process.
+		{"database ahead", cellTotals{Bids: 101, MaxSeq: 100}, verdictWarn},
+		{"watermark ahead", cellTotals{Bids: 100, MaxSeq: 101}, verdictWarn},
+		// A confirmed bid that vanished. The headline of the etapa, and it does
+		// not move for any injection.
+		{"database behind", cellTotals{Bids: 99, MaxSeq: 100}, verdictFail},
+		{"watermark behind", cellTotals{Bids: 100, MaxSeq: 99}, verdictFail},
+		// One direction on each half: the harsher one has to survive.
+		{"ahead on count, behind on watermark", cellTotals{Bids: 101, MaxSeq: 99}, verdictFail},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			chaos := &chaosReport{Scenario: "auctiond-kill", Target: "auctiond", Strategy: "shard", Landed: true}
+			if got := checkDurability(tc.db, baseClient(), chaos); got.Verdict != tc.want {
 				t.Errorf("verdict = %s (%s), want %s", got.Verdict, got.Detail, tc.want)
 			}
 		})
@@ -65,7 +96,36 @@ func TestCellValidity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := baseClient()
 			tc.client(&c)
-			if got := checkCellValidity(c, tc.env); got.Verdict != tc.want {
+			if got := checkCellValidity(c, tc.env, nil); got.Verdict != tc.want {
+				t.Errorf("verdict = %s (%s), want %s", got.Verdict, got.Detail, tc.want)
+			}
+		})
+	}
+}
+
+// Under chaos the error rate is the injection, and the four checks that are
+// about the generator being configured right are not: those keep failing,
+// because the generator is not what is being killed.
+func TestCellValidityUnderChaos(t *testing.T) {
+	landed := &chaosReport{Scenario: "redis-pause", Target: "redis", Strategy: "optimistic", Landed: true}
+	cases := []struct {
+		name   string
+		client func(*clientReport)
+		want   verdict
+	}{
+		{"errors are the injection", func(c *clientReport) { c.Error = i64(120); c.Attempts = i64(1000) }, verdictWarn},
+		{"auctions closing is the point", func(c *clientReport) { c.Closed = i64(3) }, verdictOK},
+		// The generator is not the target of any of the four injections.
+		{"k6 misconfigured", func(c *clientReport) { c.Invalid = i64(1) }, verdictFail},
+		{"negative counter", func(c *clientReport) { c.TransportRetries = i64(-1) }, verdictFail},
+		{"duplicates not selected", func(c *clientReport) { c.DuplicatesSelected = i64(0) }, verdictFail},
+		{"no replay", func(c *clientReport) { c.Replayed = i64(0) }, verdictFail},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := baseClient()
+			tc.client(&c)
+			if got := checkCellValidity(c, calmGenerator(), landed); got.Verdict != tc.want {
 				t.Errorf("verdict = %s (%s), want %s", got.Verdict, got.Detail, tc.want)
 			}
 		})

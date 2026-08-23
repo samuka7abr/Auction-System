@@ -30,7 +30,7 @@ BENCH_ENDS_IN ?= 30m
 SEED_SOURCES    = $(shell find cmd/seed internal -name '*.go') go.mod
 CHECKER_SOURCES = $(shell find cmd/checker -name '*.go') go.mod
 
-.PHONY: up down migrate migrate-down seed run logs test fmt lint bench check
+.PHONY: up down migrate migrate-down seed run logs test fmt lint bench check chaos
 
 up:
 	docker compose up -d --build
@@ -75,6 +75,14 @@ bench:
 # testable without re-running the load.
 check: bin/checker
 	DATABASE_URL="$(HOST_DB_URL)" ./bin/checker -run=$(RUN)
+
+# The five chaos cells. One line, because the loop lives in the script and not
+# here: make collapses any recipe failure into its own exit code, 2, which would
+# erase the checker's difference between a violated invariant (1) and a cell that
+# could not be verified (2). This target is for a person; automation calls
+# chaos/run-all.sh directly (decisão 93).
+chaos:
+	chaos/run-all.sh
 
 logs:
 	docker compose logs -f

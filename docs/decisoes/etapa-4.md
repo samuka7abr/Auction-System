@@ -206,3 +206,177 @@ Serviço novo no `docker-compose.yaml`, com CPU e memória fixadas, sem `profile
 **Meia CPU e 256M:** é um consumidor sequencial que faz um `UPDATE` por vez (decisão 77). O limite existe para que ele não possa competir com o `auctiond` num pico, não porque ele precise do teto.
 
 **O que isso implica para a comparação, dito em voz alta:** células rodadas antes desta etapa e depois dela não são estritamente comparáveis — o `auctiond` ganhou uma consulta por segundo (decisão 69) e a máquina ganhou um processo. A matriz da etapa 5 roda inteira depois daqui, então as três estratégias pagam o mesmo custo, que é o que o invariante de método exige. Os números avulsos das etapas 1 a 3 continuam servindo para o que serviram: verificar mecanismo, nunca para entrar no gráfico final.
+
+---
+
+## Decisões da spec 02
+
+Tomadas ao desenhar a [spec 02 da etapa 4](../specs/etapa-4/02-spec-caos.md), os cenários de caos. Nenhuma delas emenda um documento publicado: a spec 02 cumpre a tabela de caos de [provas.md](../projeto/provas.md) como ela está escrita, e não acrescenta uma série sequer ao que [observabilidade.md](../projeto/observabilidade.md) já declara.
+
+---
+
+### 81. O caos é injetado de fora, e nenhum binário sabe que ele existe
+
+O injetor é um script que fala com `docker`, `redis-cli`, `psql` e `curl`. Nenhum processo do projeto lê variável de caos, expõe endpoint de falha ou carrega um `if` de injeção.
+
+**Por quê:** a alternativa é um `FAULT_INJECT=...` lido pelo `auctiond`, e ela é sedutora porque dá controle fino — dá para falhar exatamente o terceiro commit em lote do shard, que de fora é impossível. E é errada pelo motivo mais simples que existe: **o binário com o `if` dentro não é o binário que roda a matriz**. Um ramo de código que só existe para o caos é um ramo que as 36 células nunca exercitam, e o dia em que ele ficar preso ligado — uma variável esquecida no `.env`, um default trocado — a matriz inteira mede outra coisa e não avisa.
+
+Matar de fora tem a propriedade que o projeto quer: `SIGKILL` num contêiner é a única falha que **não tem código nenhum por trás**. É a única forma de exercitar o caminho que ninguém escreveu, e é justamente esse caminho que uma prova de resiliência precisa cobrar.
+
+**Consequência aceita:** não dá para escolher o instante exato da morte. Os cenários compram determinismo suficiente por construção em vez de por controle — a decisão 77 garante no máximo uma mensagem em voo no `closerd`, então matá-lo em qualquer instante deixa no máximo uma entrada pendente; a decisão 54 garante que o `201` do shard sai depois do commit, então matar o `auctiond` em qualquer instante não produz aceite não persistido. Quando o desenho torna todos os instantes equivalentes, escolher o instante deixa de valer alguma coisa.
+
+---
+
+### 82. A célula de caos é uma célula, e entra por um gancho no `run-cell.sh`
+
+O injetor não tem harness próprio: sobe em segundo plano de dentro de `bench/run-cell.sh`, e tudo o mais é idêntico — mesmo reset, mesmo warmup, mesmo segundo reset, mesmo `FLUSHALL`, mesmo `env.sh`, mesmo `checker`.
+
+**Por quê:** um harness de caos separado provaria propriedades de um sistema que não é o medido. Outro estado inicial, outro aquecimento, outro caminho até a carga — e a conclusão "o sistema aguenta" passaria a valer para um sistema que nenhuma célula da matriz descreve. O terceiro invariante de método é sobre recurso fixo; este é o mesmo raciocínio aplicado ao procedimento.
+
+E o custo de manter dois caminhos que precisam permanecer idênticos é pago para sempre, começando na etapa em que menos se pode pagar: a seguinte roda 36 células por cima deste script.
+
+**Sem `CHAOS`, nada muda.** É requisito e é conferido: o `run-cell.sh` que a etapa 5 executa 36 vezes se comporta exatamente como antes deste PR, incluindo abortar em qualquer código de saída do k6.
+
+---
+
+### 83. O gerador de carga não muda, e o `threshold` que estoura é evidência
+
+`bench/bid-storm.js` fica byte a byte igual, inclusive o `http_req_failed: ['rate<0.01']` que vai estourar em três dos cinco cenários.
+
+**Por quê:** o caminho fácil é um `-e CHAOS=1` desligando o threshold, exatamente como `WARMUP` já faz. Ele custaria a propriedade mais valiosa que o harness tem: **o gerador que produziu a célula de caos é o mesmo binário, com a mesma configuração, que produz as 36 células da matriz**. Um instrumento com um modo a mais é um instrumento a menos de comparação, e a próxima pergunta de um leitor cético — *"o gerador do caos era o mesmo?"* — passaria a ter a resposta errada.
+
+**E o threshold estourando não é um contorno, é um dado:** é a primeira confirmação de que a falha aterrissou, vinda do cliente e não do injetor. `run-cell.sh` aceita o código 99 do k6 **apenas** sob caos, e continua fatal fora dele; qualquer outro código do k6 continua abortando a célula, porque crash do gerador não é injeção de falha.
+
+---
+
+### 84. `chaos.json` é o artefato, e "não aterrissou" reprova a célula
+
+O injetor escreve `chaos.json` ao lado de `client.json` e `env.json`, com os passos executados, a evidência colhida de fora do processo, e um `landed`. O `checker` reprova em I6 a célula de caos cujo `landed` é falso.
+
+**Por quê:** é a decisão 59 outra vez, no nível do experimento. Uma célula de caos que passou verde porque a falha nunca chegou a acontecer é o pior resultado possível do projeto inteiro — parece prova, é publicável, e não prova nada. O silêncio precisa ser distinguível do sucesso.
+
+**Por que o injetor colhe, e não o verificador:** a evidência morre com a janela. Um contêiner que já reiniciou não conta que reiniciou; um Redis que já foi despausado não lembra que ficou parado; um lock que foi solto não aparece em `pg_locks`. O `checker` roda depois que tudo isso fechou, e é o único componente do projeto que precisa se manter trivial — dar Docker a ele para reconferir trocaria uma dependência barata (Postgres) por uma cara, no lugar errado.
+
+**Limite registrado:** `landed` é uma afirmação do injetor sobre si mesmo, e o verificador confia nela. O que a spec compra em troca é que a evidência bruta — `StartedAt` antes e depois, `Paused` dentro da janela, o contador de confirmações regredindo, o `pg_locks` — fica gravada ao lado da afirmação, e um checkpoint a confere à mão uma vez. Confiança com o recibo anexado é diferente de confiança cega.
+
+---
+
+### 85. Nenhum invariante de corretude é relaxado sob caos
+
+I1, I2, I3, I4, I7 e I8 valem sob caos exatamente como valem fora dele, com o mesmo veredito e a mesma severidade. Mudam dois vereditos, e os dois são sobre a célula ser **legível**, nunca sobre a engine estar certa.
+
+| Checagem | Fora de caos | Sob caos |
+| --- | --- | --- |
+| I5 · `db.Bids < cliente` | FALHA | **FALHA** |
+| I5 · `db.Bids > cliente` | FALHA | AVISO |
+| I5 · watermark `db < cliente` | FALHA | **FALHA** |
+| I5 · watermark `db > cliente` | FALHA | AVISO |
+| I6 · erro ≥ 1% | FALHA | AVISO |
+| I6 · `closed > 0` | AVISO | evidência |
+| I6 · `landed = false` | — | **FALHA** |
+
+**Por quê, em I5:** a decisão 46 removeu a assimetria da etapa 1 porque a recuperação idempotente do transporte fechou a diferença — o cliente retenta com a mesma chave e recebe o `201` guardado. Essa recuperação precisa de alguém vivo para replicá-la. Matando o `auctiond`, a marca em Redis expira sem dono e a resposta se perde de vez: um `201` cujo commit venceu a resposta vira uma linha no banco que o cliente nunca soube que existia. É o desfecho **certo** — a alternativa seria não ter escrito —, e é a direção segura, porque nada foi perdido, só não foi contado.
+
+A outra direção não afrouxa em circunstância nenhuma, e é a manchete da etapa: **um lance que recebeu `201` e não está no banco é falha, tenha ou não alguém matado alguma coisa.**
+
+**Por quê, em I6:** ele não julga a engine, julga se a célula vale a leitura. Fora de caos, acima de 1% de erro o que quebrou foi a medição. Sob caos o erro **é** a injeção, e reprovar por ele seria reprovar o experimento por ter funcionado. Na mesma linha, `closed > 0` avisa "o `ENDS_IN` está curto demais" numa célula normal, e no cenário do `closerd` é o ponto inteiro.
+
+**O que continua reprovando sob caos:** `invalid > 0`, contador negativo, duplicata não selecionada, replay não observado. As quatro são sobre o **gerador** estar configurado certo, e o gerador não é o que está sendo derrubado.
+
+---
+
+### 86. `docker kill -s KILL`, nunca `SIGTERM`, e nenhum `restart:` no compose
+
+Todos os cenários que derrubam processo mandam `SIGKILL`. Nenhum serviço ganha política de reinício; quem sobe de volta é o injetor.
+
+**Por quê:** o caminho gracioso já tem dono e já foi demonstrado — `messageGrace` no `closerd` e o `ctx` do sinal no `auctiond` existem para `docker compose stop`, e a spec 01 os exercitou. O que nunca foi exercitado é o outro: o processo que some entre o commit e a resposta, entre o `XACK` e a próxima volta do laço, entre a decisão em memória e o commit em lote. `SIGTERM` testaria o código do desligamento, que existe; `SIGKILL` testa o desenho, que é o que está sendo afirmado desde a etapa 1.
+
+**Por que nada de `restart:`:** um contêiner que volta sozinho fecha a janela que o cenário existe para observar, e transfere a hora da volta do injetor para o Docker. Além disso mudaria o `docker-compose.yaml`, que é o arquivo que descreve o sistema que a matriz mede — e o sistema medido não pode ganhar uma propriedade só porque a etapa de caos precisou dela.
+
+---
+
+### 87. O cenário do `closerd` roda com `ENDS_IN` curto, e é o primeiro em que I4 é exigível
+
+`chaos-closerd-kill` usa `BENCH_ENDS_IN=45s` e leilões que vencem no meio da rampa, contra o `ENDS_IN` folgado de todas as células das etapas 1 a 4.
+
+**Por quê:** o `ENDS_IN` folgado existe por bons motivos e continua valendo para a matriz — um leilão morrendo no meio da carga mistura contenção com a borda do fechamento num número só. A consequência silenciosa é que `WHERE ... now() < ends_at`, a guarda que sustenta a promessa central do projeto, **nunca encontrou um leilão vencido sob carga**, e I4 passou verde por vacuidade em toda célula já rodada. Um invariante que nunca pôde falhar não é evidência de nada.
+
+O cenário cobra a conjunção que a decisão 12 desenhou: **o `closerd` estar morto não pode deixar entrar lance atrasado**. Com o worker fora do ar, a coluna `status` continua dizendo `open` por um minuto inteiro, e nenhum lance entra — porque quem recusa não é a coluna, é o `ends_at` comparado ao relógio do banco.
+
+**Por que ele roda duas vezes:** sob `shard`, quem decide o fechamento é uma goroutine em memória usando o desvio de relógio medido na hidratação (decisão 50), e `created_at` é escrito a partir do instante da decisão e não do commit. Esse desenho existe desde a etapa 3 e nunca encontrou um `ends_at` de verdade. Repetir o cenário sob `shard` custa uma linha no laço e três minutos, e é a única execução do projeto em que a engine que é a aposta da tese é colocada na borda.
+
+**Se I4 reprovar sob `shard` e passar sob `optimistic`, é achado sobre a engine e não se conserta na spec 02.** Parar e reportar é o comportamento correto: consertar uma engine dentro do PR que a testou é como o cenário de caos deixa de ser prova.
+
+---
+
+### 88. A convergência do fechamento é medida depois da carga, e entra em `chaos.json` como número
+
+O injetor, terminada a carga, espera até 120 segundos por `stream_pending_entries` e `stream_backlog_entries` zerados e grava `convergedAfterSeconds`.
+
+**Por quê:** é a decisão 79 cumprida com um número em vez de uma promessa. Aquela decisão recusou o invariante *"todo leilão vencido está fechado"* porque ele é falso enquanto o `closerd` está morto — e disse, na mesma frase, que convergência seria **medida** e não afirmada. Este é o lugar onde a medição acontece, e é o cenário certo: o único do projeto em que o worker fica fora do ar de propósito, com fila crescendo, e volta.
+
+**Por que no injetor e não no `checker`:** o verificador roda uma vez, contra o estado final, e sai. Convergência é uma propriedade do tempo entre dois instantes, e o único componente que está de pé nos dois é o injetor. Dar espera ao `checker` o transformaria de verificador em observador, e um verificador que espera é um verificador que pode ser feito passar esperando mais.
+
+---
+
+### 89. O cenário do Redis prova falha fechada, e prova silêncio no lugar de zero
+
+`docker pause redis` por cinco segundos, no meio da rampa, com o `/metrics` colhido dentro da janela.
+
+**Por quê:** três promessas escritas em três etapas diferentes são cobradas de uma vez, e nenhuma delas jamais encontrou um Redis fora do ar.
+
+A **decisão 36** fez a idempotência falhar fechada: Redis indisponível não vira lance sem guarda, vira `503 unavailable` com `retryable: true`. O `ReadTimeout` padrão do cliente é o que transforma um contêiner congelado em erro em três segundos, em vez de numa requisição pendurada — e isso nunca tinha sido observado.
+
+O comentário de **`internal/db/redis.go`** promete, desde a etapa 2, que um Redis que morre depois do boot mantém o processo vivo, deixa `/readyz` vermelho e `/healthz` verde. É uma frase que só vira verdade quando alguém mata o Redis.
+
+E as **decisões 59 e 73**, que são a parte bonita: com o Redis congelado, o `XINFO GROUPS` do scrape falha e as duas gauges de fila **não são emitidas**. Não saem zeradas. Um painel mostrando zero de fila durante um apagão do Redis estaria mentindo exatamente no incidente que ele existe para cobrir, e este cenário é onde a regra deixa de ser um parágrafo.
+
+**O que o cenário também mostra, e a spec diz sem enfeitar:** com a idempotência acima do switch de estratégia, um Redis indisponível é uma indisponibilidade de escrita completa nas três engines. Não é defeito, é o preço da decisão 36 — e agora ele tem um número em vez de um parágrafo.
+
+---
+
+### 90. O cenário do pool usa lock de linha, roda no pessimista, e nunca escreve
+
+Uma transação de fora segura `SELECT ... FOR UPDATE` sobre a linha do leilão por oito segundos e termina em `ROLLBACK`.
+
+**Por que não `pg_sleep` em N conexões:** isso satura o **Postgres**, que não é o recurso sob teste. O que se quer encher é o pool do `auctiond`, e a única forma honesta de enchê-lo é fazer o trabalho que ele já faz demorar. Um lock de linha faz exatamente isso, sem tocar em configuração, sem reiniciar nada e sem escrever nada.
+
+**Por que o pessimista:** é a engine cuja tese é o pool. Ela segura conexão durante a espera de lock, e é a única das três em que "saturou o pool" e "esperou lock" são o mesmo evento. É também a engine que a etapa 5 vai varrer por tamanho de pool, e este cenário é o piso daquela varredura.
+
+**Por que o injetor nunca escreve, em nenhum cenário:** uma linha inserida por ele seria uma linha que o cliente não contou, e I5 a reportaria como divergência entre banco e cliente. O instrumento de medida falsificaria a medida. `ROLLBACK` sempre, e nenhum `INSERT`, `UPDATE` ou `DELETE` em lugar nenhum do script.
+
+**Um resultado possível vale como achado e não como falha:** `/readyz` pode responder 503 durante a janela, porque a sonda do Postgres também pega conexão do mesmo pool. Se acontecer, o código fica gravado e a etapa termina com isso registrado — acoplar prontidão a um pool saturado é uma propriedade real do desenho, e descobri-la é o que o cenário serve para fazer.
+
+---
+
+### 91. Cada cenário declara a estratégia que exige, e diz por quê
+
+| Cenário | Estratégia | Por quê |
+| --- | --- | --- |
+| `closerd-kill` | `optimistic` | O `closerd` não está no caminho da requisição; a mais barata serve |
+| `closerd-kill-shard` | `shard` | A engine que decide em memória encontrando um `ends_at` real (decisão 87) |
+| `auctiond-kill` | `shard` | A única com estado que morre junto com o processo |
+| `redis-pause` | `optimistic` | O middleware fica acima do switch: as três se comportam igual |
+| `pool-saturation` | `pessimistic` | A engine cujo ponto de sincronização é o pool (decisão 90) |
+
+**Por quê:** rodar os cinco contra uma estratégia só seria mais simples e provaria menos. Dois dos cinco cobram propriedades que só existem numa engine — o estado em memória do shard, o pool do pessimista —, e tratá-los como independentes de engine seria abrir mão de graça da parte mais afiada da prova. Os outros três declaram a estratégia **e** declaram que ela é indiferente, o que é uma afirmação diferente de não dizer nada.
+
+---
+
+### 92. Célula de caos não entra em gráfico
+
+Os cinco `RUN` são prefixados com `chaos-`, e nenhum número vindo deles entra na matriz, na tabela de resultados ou no gráfico de cruzamento.
+
+**Por quê:** é a mesma regra que fez os números avulsos das etapas 1 a 3 servirem para verificar mecanismo e nunca para o gráfico final. Uma célula com um processo morto no meio mediu um sistema que não é o sistema comparado; publicar `aceitos/s` dela ao lado de uma célula da matriz seria comparar duas coisas diferentes com a mesma unidade, que é a forma mais eficiente de produzir um gráfico bonito e falso.
+
+O prefixo é a mecânica: a etapa 5 escreve com nomes de célula, e a etapa 6 lê a matriz. O que a célula de caos publica é o `checker.txt` e o `chaos.json` — vereditos e evidência, não desempenho.
+
+---
+
+### 93. `make chaos` é para gente; automação chama `chaos/run-all.sh`
+
+O laço dos cinco cenários mora num script, e o alvo do Makefile é uma linha que o chama.
+
+**Por quê:** o GNU make colapsa qualquer falha de recipe no seu próprio código de saída, 2. O `cmd/checker` distingue, de propósito e desde a etapa 1, invariante violado (1) de célula não verificável (2) — a primeira é um resultado sobre a engine, a segunda é a ausência de resultado. Passar o laço por dentro do `make` apaga essa distinção exatamente onde ela custa mais caro: numa automação que precisa decidir se para a execução ou se rerroda a célula.
+
+**A regra, dita para ser seguida depois:** todo laço que precisa do código de saída — este, e o da matriz da etapa 5 — chama o script direto. O alvo do Makefile continua existindo porque a mão humana não lê código de saída, lê a última linha do relatório.

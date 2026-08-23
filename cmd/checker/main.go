@@ -52,11 +52,15 @@ type finding struct {
 }
 
 type report struct {
-	Run      string    `json:"run"`
-	Findings []finding `json:"findings"`
-	Warnings int       `json:"warnings"`
-	Failures int       `json:"failures"`
-	Exit     int       `json:"exit"`
+	Run string `json:"run"`
+	// Chaos is absent in every cell of the matrix and present in the five of
+	// spec 02. It is carried into the JSON so that a row nobody may compare
+	// against a healthy one says so in its own artefact (decisão 92).
+	Chaos    *chaosReport `json:"chaos,omitempty"`
+	Findings []finding    `json:"findings"`
+	Warnings int          `json:"warnings"`
+	Failures int          `json:"failures"`
+	Exit     int          `json:"exit"`
 }
 
 func main() {
@@ -90,6 +94,12 @@ func execute(run, results string, asJSON bool, out io.Writer) int {
 	if err != nil {
 		return unverifiable(out, err)
 	}
+	// Absent is the normal cell and the only artefact of this harness whose
+	// absence means something rather than nothing.
+	chaos, err := readChaos(dir)
+	if err != nil {
+		return unverifiable(out, err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -109,12 +119,13 @@ func execute(run, results string, asJSON bool, out io.Writer) int {
 	findings := make([]finding, 0, len(sqlFindings)+2)
 	for _, f := range sqlFindings {
 		if f.ID == "I7" {
-			findings = append(findings, checkDurability(totals, client), checkCellValidity(client, env))
+			findings = append(findings, checkDurability(totals, client, chaos), checkCellValidity(client, env, chaos))
 		}
 		findings = append(findings, f)
 	}
 
 	rep := summarize(run, findings)
+	rep.Chaos = chaos
 	render(out, rep)
 	if asJSON {
 		if err := writeJSON(filepath.Join(dir, "checker.json"), rep); err != nil {
@@ -152,6 +163,11 @@ const (
 )
 
 func render(out io.Writer, rep report) {
+	// Above the verdicts, never below: a reader who stops at the first line has
+	// to know that a process was killed inside this cell.
+	if rep.Chaos != nil {
+		fmt.Fprintln(out, rep.Chaos.line())
+	}
 	for _, f := range rep.Findings {
 		line := pad(f.ID, idWidth) + pad(f.Name, nameWidth) + pad(string(f.Verdict), verdictWidth) + f.Detail
 		fmt.Fprintln(out, strings.TrimRight(line, " "))
