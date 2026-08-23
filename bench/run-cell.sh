@@ -27,7 +27,18 @@ MIN_INCREMENT="${MIN_INCREMENT:-100}"
 # Loose enough that nothing closes mid-cell: an auction dying under load mixes
 # contention with the closing edge in one number, and the edge deserves a cell
 # of its own (etapa 5). I6 warns if any bid still meets a closed auction.
-ENDS_IN="${ENDS_IN:-30m}"
+#
+# BENCH_ENDS_IN is the name the Makefile and the chaos checkpoints use for the
+# same knob, and it is accepted here so that a caller that skips `make bench`
+# does not silently get the 30m default — a chaos cell that never reaches an
+# ends_at proves nothing, and would say so nowhere.
+ENDS_IN="${ENDS_IN:-${BENCH_ENDS_IN:-30m}}"
+
+# The failure injected from outside, empty in every cell of the matrix. Setting
+# it changes three things and nothing else: the injector runs alongside the
+# measured load, k6 exit code 99 stops being fatal, and the injector is waited
+# for afterwards (RF08).
+CHAOS="${CHAOS:-}"
 
 POSTGRES_USER="${POSTGRES_USER:-auction}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-auction}"
@@ -39,7 +50,6 @@ RESULTS="bench/results/$RUN"
 MANIFEST="bench/auctions.json"
 K6_NAME="bid-storm-k6-$RUN"
 STATS="$(mktemp -d)"
-trap 'stop_watching; rm -rf "$STATS"' EXIT
 
 pg() { docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -qtA "$@"; }
 say() { printf '\n== %s\n' "$*"; }
@@ -119,6 +129,34 @@ stop_watching() {
   WATCHER=""
 }
 
+# SIGTERM and not SIGKILL, and this is the whole reason the cure lives in a trap
+# inside the injector: the cell aborting is exactly when a Redis left paused or a
+# row left locked would poison every cell that comes after.
+# shellcheck disable=SC2329  # reached from the EXIT trap, like stop_watching
+stop_injector() {
+  [ -n "${INJECTOR:-}" ] || return 0
+  kill -TERM "$INJECTOR" 2> /dev/null || :
+  wait "$INJECTOR" 2> /dev/null || :
+  INJECTOR=""
+}
+
+# The injector measures the convergence of the closing after the load, so it is
+# waited for and never killed on the happy path (decisão 88).
+wait_injector() {
+  [ -n "${INJECTOR:-}" ] || return 0
+  local pid="$INJECTOR"
+  INJECTOR=""
+  if ! wait "$pid"; then
+    echo "run-cell: the injector exited non-zero" >&2
+    return 1
+  fi
+}
+
+# Armed only now, and this is not cosmetic: a trap set before these functions
+# exist answers "command not found" when the pre-flight fails, and the cell
+# exits 127 instead of the 1 or 2 the loop of etapa 5 reads (decisão 93).
+trap 'stop_watching; stop_injector; rm -rf "$STATS"' EXIT
+
 say "reset, seed $AUCTIONS auction(s), vacuum"
 reset
 
@@ -136,9 +174,33 @@ reset
 started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 watch_generator &
 WATCHER=$!
+# Alongside the measured load and never before the warmup, which has to be a
+# warmup and not an injection (decisão 82).
+if [ -n "$CHAOS" ]; then
+  say "chaos: injecting $CHAOS from outside the processes"
+  STRATEGY="$STRATEGY" K6_NAME="$K6_NAME" chaos/inject.sh "$CHAOS" "$RESULTS" &
+  INJECTOR=$!
+fi
 say "load: scenario=$SCENARIO auctions=$AUCTIONS policy=$POLICY"
+set +e
 k6_run
+k6_code=$?
+set -e
+# 99 is a breached threshold, and http_req_failed is exactly the threshold a live
+# injection breaks — the first confirmation that the failure landed, coming from
+# the client and not from the injector. It is accepted only under chaos, and
+# every other code keeps aborting either way: a generator that crashed is not an
+# injection (decisão 83).
+if [ "$k6_code" -ne 0 ]; then
+  if [ -n "$CHAOS" ] && [ "$k6_code" -eq 99 ]; then
+    say "k6 exited 99: the threshold broke under $CHAOS, which is the evidence"
+  else
+    echo "run-cell: k6 exited $k6_code" >&2
+    exit "$k6_code"
+  fi
+fi
 stop_watching
+wait_injector
 finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 peak_raw=$(cat "$STATS/peak" 2> /dev/null || echo 0)
