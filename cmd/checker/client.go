@@ -53,10 +53,23 @@ func (c clientReport) required() map[string]*int64 {
 	}
 }
 
-// envReport is read for one number only: whether the generator was near its own
-// limit while the cell ran. A saturated k6 measures k6.
+// envReport is read for two facts about the observation, and for nothing about
+// the engine: whether the generator was near its own limit while the cell ran —
+// a saturated k6 measures k6 — and whether the harness stopped watching before
+// the load ended.
 type envReport struct {
 	Generator *generatorReport `json:"generator"`
+	Cell      *cellReport      `json:"cell"`
+}
+
+type cellReport struct {
+	// Absent in every cell measured before etapa 5 gave the harness a budget,
+	// and in every cell nobody interrupted: the two are the same statement.
+	Interrupted *bool `json:"interrupted"`
+}
+
+func (e envReport) interrupted() bool {
+	return e.Cell != nil && e.Cell.Interrupted != nil && *e.Cell.Interrupted
 }
 
 type generatorReport struct {
@@ -111,7 +124,7 @@ func readFile(path string, into any) error {
 // Under chaos the asymmetry comes back, and only in the safe direction: see
 // aheadUnderChaos. The other direction — a confirmed bid the database does not
 // have — is the failure this whole harness exists for, and it does not move.
-func checkDurability(db cellTotals, c clientReport, chaos *chaosReport) finding {
+func checkDurability(db cellTotals, c clientReport, e envReport, chaos *chaosReport) finding {
 	f := finding{ID: "I5", Name: "durabilidade db x cliente", Verdict: verdictOK}
 	accepted, maxSeq := *c.Accepted, *c.MaxSeqSeen
 
@@ -120,8 +133,8 @@ func checkDurability(db cellTotals, c clientReport, chaos *chaosReport) finding 
 		f.Verdict = verdictFail
 		f.Detail = fmt.Sprintf("LANCE CONFIRMADO SUMIU: db=%d cliente=%d", db.Bids, accepted)
 	case db.Bids > accepted:
-		f.Verdict = aheadUnderChaos(chaos)
-		f.Detail = fmt.Sprintf("BANCO À FRENTE: db=%d cliente=%d", db.Bids, accepted)
+		f.Verdict = aheadWhenCut(chaos, e)
+		f.Detail = fmt.Sprintf("BANCO À FRENTE: db=%d cliente=%d%s", db.Bids, accepted, becauseCut(chaos, e))
 	default:
 		f.Detail = fmt.Sprintf("db=%d cliente=%d", db.Bids, accepted)
 	}
@@ -138,24 +151,41 @@ func checkDurability(db cellTotals, c clientReport, chaos *chaosReport) finding 
 		f.Verdict = worse(f.Verdict, verdictFail)
 		f.Detail += fmt.Sprintf(" · watermark divergente: db=%d cliente=%d", db.MaxSeq, maxSeq)
 	case db.MaxSeq > maxSeq:
-		f.Verdict = worse(f.Verdict, aheadUnderChaos(chaos))
+		f.Verdict = worse(f.Verdict, aheadWhenCut(chaos, e))
 		f.Detail += fmt.Sprintf(" · watermark divergente: db=%d cliente=%d", db.MaxSeq, maxSeq)
 	}
 	return f
 }
 
-// aheadUnderChaos is half of decisão 85: the database holding more than the
-// client counted is a 201 whose commit outran its own response, and killing the
-// process that would have answered is exactly how that happens — the mark in
-// Redis expires with no owner and the stored response is lost for good.
+// aheadWhenCut is half of decisão 85: the database holding more than the client
+// counted is a 201 whose commit outran its own response, and killing the process
+// that would have answered is exactly how that happens — the mark in Redis
+// expires with no owner and the stored response is lost for good.
 //
-// Outside chaos there is no such excuse and it stays a failure: idempotent
-// transport recovery is supposed to make every durable write observable.
-func aheadUnderChaos(chaos *chaosReport) verdict {
-	if chaos != nil {
+// A cell the harness interrupted is the same physics with the other end cut:
+// SIGINT abandons the iterations in flight, and a bid already committed by a
+// server that is still perfectly alive has nobody left to read its 201. The
+// number is bounded by what was in flight — one bid, in a pessimistic cell,
+// because the lock lets exactly one through at a time (spec 02).
+//
+// With neither excuse it stays a failure: idempotent transport recovery is
+// supposed to make every durable write observable. And the other direction —
+// a confirmed bid the database does not have — does not move for either, which
+// is the whole reason this function only softens one of them.
+func aheadWhenCut(chaos *chaosReport, e envReport) verdict {
+	if chaos != nil || e.interrupted() {
 		return verdictWarn
 	}
 	return verdictFail
+}
+
+// Which of the two cuts it was, said in the line the reader sees: a warning
+// whose reason is not written down is a warning somebody has to guess at.
+func becauseCut(chaos *chaosReport, e envReport) string {
+	if chaos == nil && e.interrupted() {
+		return " · célula interrompida: o commit ultrapassou a resposta que ninguém leu"
+	}
+	return ""
 }
 
 // The share of requests that may fail for real before the cell stops being a
