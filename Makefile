@@ -30,7 +30,7 @@ BENCH_ENDS_IN ?= 30m
 SEED_SOURCES    = $(shell find cmd/seed internal -name '*.go') go.mod
 CHECKER_SOURCES = $(shell find cmd/checker -name '*.go') go.mod
 
-.PHONY: up down migrate migrate-down seed run logs test fmt lint bench check chaos
+.PHONY: up down migrate migrate-down seed run logs test fmt lint bench check chaos matrix
 
 up:
 	docker compose up -d --build
@@ -83,6 +83,15 @@ check: bin/checker
 # chaos/run-all.sh directly (decisão 93).
 chaos:
 	chaos/run-all.sh
+
+# The 36 cells and the control, ~1h30. One line, and for the same reason as
+# `make chaos`: the loop lives in the script because make collapses every exit
+# code into its own 2, which is exactly the difference the matrix needs to keep
+# between a violated invariant (1), a cell it could not verify (2) and a
+# breached threshold (99) — decisão 93. `make matrix RESUME=1` and
+# `make matrix MATRIX=...` work through the export at the top of this file.
+matrix:
+	bench/run-matrix.sh
 
 logs:
 	docker compose logs -f

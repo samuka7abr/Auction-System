@@ -83,6 +83,7 @@ docs/
 | [decisoes/etapa-2.md](decisoes/etapa-2.md) | As decisões da etapa 2, numeradas de 25 a 47. A 27 emenda a 22 para o caso transacional; as de 31 a 47 fecham idempotência, carga duplicada e os invariantes correspondentes |
 | [decisoes/etapa-3.md](decisoes/etapa-3.md) | As decisões da etapa 3, a partir da 48. A 48 e a 52 emendam `estrategias.md` sobre o lote do shard; a 58 emenda a 16 por uma spec; as de 59 a 67 fecham a instrumentação do mecanismo, e a 59, a 60 e a 67 emendam `observabilidade.md` e a spec 01 |
 | [decisoes/etapa-4.md](decisoes/etapa-4.md) | As decisões da etapa 4, a partir da 68. A 69 emenda o diagrama de `arquitetura.md` sobre quem publica o evento de fechamento, e a 73 emenda `observabilidade.md` desdobrando a série de fila em duas, publicadas pelo produtor. As de 81 a 93 fecham o caos: injeção por fora do processo, a célula de caos como célula, e os dois únicos vereditos que afrouxam |
+| [decisoes/etapa-5.md](decisoes/etapa-5.md) | As decisões da etapa 5, a partir da 94. A 94 emenda o laço de exemplo de `benchmark.md` — a estratégia é o eixo mais interno e o `auctiond` é recriado a cada célula —, e a 104 precisa o que "mesmo volume total de requisições" quer dizer. As de 94 a 109 fecham a matriz: a ordem das células, a banda do controle, as nove recusas e o que a matriz publica em vez de esconder |
 
 **`specs/` — o que construir**
 
@@ -98,6 +99,7 @@ docs/
 | [specs/etapa-3/02-spec-metricas-do-shard.md](specs/etapa-3/02-spec-metricas-do-shard.md) | `bid_accept_duration_seconds`, `journal_lag_seconds`, `shard_batch_size` e `shard_inbox_depth`: o custo da durabilidade medido direto, sem subtrair série de série |
 | [specs/etapa-4/01-spec-fechamento-e-closerd.md](specs/etapa-4/01-spec-fechamento-e-closerd.md) | Varredor de vencidos no `auctiond`, `internal/stream` sobre Redis Streams, `closerd` materializando `status` e `closed_at` sem poder violar invariante, e I8 |
 | [specs/etapa-4/02-spec-caos.md](specs/etapa-4/02-spec-caos.md) | `chaos/inject.sh` derrubando `closerd`, `auctiond`, Redis e o pool sob carga, `chaos.json` como artefato da injeção, e I5 e I6 aprendendo a ler uma célula quebrada de propósito |
+| [specs/etapa-5/01-spec-matriz.md](specs/etapa-5/01-spec-matriz.md) | `bench/run-matrix.sh` rodando as 36 células mais a célula-controle, `cmd/matrix` agregando `env.json`, `client.json` e `checker.json` em `matrix.json`, e as nove recusas que impedem uma matriz incoerente de virar gráfico |
 
 Modelo em [specs/spec-model.md](specs/spec-model.md).
 
@@ -111,9 +113,10 @@ make migrate                         # aplica migrations (golang-migrate)
 make seed AUCTIONS=1                 # semeia N leilões
 make run STRATEGY=optimistic         # sobe auctiond (e closerd, a partir da etapa 4)
 make test                            # suíte de conformidade (testcontainers)
-make bench                           # matriz completa, gera bench/results/
+make bench                           # uma célula, ponta a ponta, em bench/results/
 make check RUN=<id>                  # verificador de invariantes
 make chaos                           # injeção de falhas sob carga
+make matrix                          # as 36 células e o controle, gera matrix.json
 make types                           # regenera web/src/types.gen.ts das structs Go
 make web                             # painel em http://localhost:5173
 ```

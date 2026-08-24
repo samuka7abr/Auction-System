@@ -339,6 +339,7 @@ export function handleSummary(data) {
     duplicatesInjected: count(data, 'duplicates_injected'),
     transportRetries: count(data, 'transport_retries'),
     maxSeqSeen: trend(data, 'seq_seen').max,
+    durationMs: duration(data),
     confirmLatencyMs: trend(data, 'bid_confirm_latency'),
     clientAttemptsPerAccept: trend(data, 'client_attempts_per_accept'),
   };
@@ -377,4 +378,17 @@ function trend(data, name) {
     if (typeof out[key] !== 'number') throw new Error(`metric ${name} has no numeric ${key}`);
   }
   return out;
+}
+
+// The window the rates of etapa 5 are computed over, and the only honest one:
+// env.json's startedAt..finishedAt covers reset, seed, vacuum, warmup, a second
+// reset and the checker, which for a 15s spike is four times the load itself.
+//
+// It throws instead of returning zero, by the same rule as count and trend: a
+// summary shape that moved under a k6 upgrade has to break here and loudly, and
+// not three steps later as a green rate computed over nothing (decisão 97).
+function duration(data) {
+  const ms = data.state && data.state.testRunDurationMs;
+  if (typeof ms !== 'number' || !(ms > 0)) throw new Error('k6 summary has no testRunDurationMs');
+  return ms;
 }

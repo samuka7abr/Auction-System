@@ -119,7 +119,7 @@ func execute(run, results string, asJSON bool, out io.Writer) int {
 	findings := make([]finding, 0, len(sqlFindings)+2)
 	for _, f := range sqlFindings {
 		if f.ID == "I7" {
-			findings = append(findings, checkDurability(totals, client, chaos), checkCellValidity(client, env, chaos))
+			findings = append(findings, checkDurability(totals, client, env, chaos), checkCellValidity(client, env, chaos))
 		}
 		findings = append(findings, f)
 	}

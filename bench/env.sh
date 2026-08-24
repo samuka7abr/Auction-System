@@ -7,6 +7,11 @@
 # for the same reason: it shares the machine with the benchmark in every cell,
 # so it goes into env.json or it becomes a hidden variable (decisão 80).
 #
+# cell.interrupted joins them in etapa 5: it says the harness watched this cell
+# for less time than the scenario asked for, and it is the only place that says
+# so. cmd/checker does not read it — it judges correctness, and a cell that was
+# watched briefly is not an incorrect cell (decisão 97).
+#
 # The limits come from `docker inspect` and not from the YAML, for the same
 # reason as C1 of spec 01: a limit the Compose silently ignored is not a limit,
 # and the env.json of a number that gets published cannot lie about it.
@@ -50,6 +55,7 @@ jq -n \
   --arg policy "${POLICY:-immediate}" \
   --arg scenario "${SCENARIO:-smoke}" \
   --argjson poolSize "${DB_POOL_SIZE:-25}" \
+  --argjson interrupted "${CELL_INTERRUPTED:-false}" \
   --arg kernel "$(uname -sr)" \
   --argjson hostCpus "$(nproc)" \
   --argjson hostMemory "$(awk '/MemTotal/ { print $2 * 1024 }' /proc/meminfo)" \
@@ -73,7 +79,7 @@ jq -n \
     finishedAt: $finishedAt,
     git: {commit: $commit, dirty: $dirty},
     cell: {strategy: $strategy, auctions: $auctions, policy: $policy,
-           scenario: $scenario, poolSize: $poolSize},
+           scenario: $scenario, poolSize: $poolSize, interrupted: $interrupted},
     host: {kernel: $kernel, cpus: $hostCpus, memoryBytes: $hostMemory},
     images: {postgres: $pgImage, auctiond: $auctiondImage, closerd: $closerdImage,
              k6: $k6Image},
