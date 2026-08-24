@@ -21,8 +21,14 @@ if [ -f .env ]; then
   done < .env
 fi
 
-AUCTIOND="${AUCTIOND_URL:-http://localhost:${HTTP_PORT:-8080}}"
-CLOSERD="${CLOSERD_URL:-http://localhost:${CLOSERD_PORT:-8081}}"
+# code_of, wait_ready, wait_strategy, and AUCTIOND/CLOSERD with them. The two
+# waits used to live here; the matrix of etapa 5 needs the same two, with the
+# same semantics, and a second copy of `wait_strategy` is a second copy of the
+# fact that the strategy label on /metrics is the proof of which engine is up
+# (decisão 109). check_cure stayed: it is the chaos loop's, and the matrix has
+# nothing to cure.
+# shellcheck source=bench/wait.sh
+. bench/wait.sh
 
 # scenario | strategy | ends-in | auctions, and the RUN is chaos-<name>.
 # closerd-kill runs twice: the second time against the engine that decides the
@@ -36,30 +42,6 @@ CELLS=(
 )
 
 say() { printf '\n######## %s\n' "$*"; }
-code_of() { curl -s -o /dev/null -m 5 -w '%{http_code}' "$1" 2> /dev/null || echo 000; }
-
-wait_ready() {
-  local url=$1 deadline=$(($(date +%s) + 90))
-  while [ "$(date +%s)" -lt "$deadline" ]; do
-    if [ "$(code_of "$url/readyz")" = "200" ]; then return 0; fi
-    sleep 2
-  done
-  echo "run-all: $url/readyz never answered 200" >&2
-  return 1
-}
-
-wait_strategy() {
-  local deadline=$(($(date +%s) + 90))
-  while [ "$(date +%s)" -lt "$deadline" ]; do
-    if curl -sf -m 5 "$AUCTIOND/metrics" 2> /dev/null |
-      grep -q "bid_confirm_duration_seconds_count{strategy=\"$1\"}"; then
-      return 0
-    fi
-    sleep 2
-  done
-  echo "run-all: auctiond never published strategy=$1" >&2
-  return 1
-}
 
 # Between scenarios, and never as an afterthought: a Redis left paused or a
 # transaction left holding a row would poison every cell that comes after, and
