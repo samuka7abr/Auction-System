@@ -40,6 +40,24 @@ ENDS_IN="${ENDS_IN:-${BENCH_ENDS_IN:-30m}}"
 # for afterwards (RF08).
 CHAOS="${CHAOS:-}"
 
+# The clock the harness gives itself to watch the measured load, in seconds.
+# Empty — the default — is the behaviour of every cell before this one: no
+# timeout anywhere, and the load ends when the scenario ends.
+#
+# It is a budget of the OBSERVATION and never of the engine. Nothing here sets a
+# lock_timeout, shortens the bidder's deadline or touches the pool: the queue in
+# front of the pessimistic lock goes on being exactly as long as it is, and what
+# changes is for how long it is watched (decisão 102).
+CELL_BUDGET="${CELL_BUDGET:-}"
+if [ -n "$CELL_BUDGET" ]; then
+  case "$CELL_BUDGET" in
+    *[!0-9]* | 0) echo "run-cell: CELL_BUDGET em segundos inteiros maiores que zero, não '$CELL_BUDGET'" >&2; exit 2 ;;
+  esac
+fi
+# How long the INT has to be honoured before the KILL of mercy. Generous on
+# purpose: writing the summary is the only thing left to do by then.
+BUDGET_GRACE="${BUDGET_GRACE:-30}"
+
 POSTGRES_USER="${POSTGRES_USER:-auction}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-auction}"
 POSTGRES_DB="${POSTGRES_DB:-auction}"
@@ -122,6 +140,31 @@ watch_generator() {
   done
 }
 
+# INT and never KILL, and the signal goes to the container rather than to
+# `docker compose run`: PID 1 in there is k6 itself, so this is the one delivery
+# that cannot be swallowed by a proxy in between. The INT is the whole point —
+# k6 stops gracefully and still runs handleSummary, so the cell ends with a
+# client.json that is SHORT instead of one that is ABSENT, and absent is exit 2,
+# which is no result at all (RF02).
+budget_watch() {
+  # Its own subshell and errexit off, for the same reason as the watcher above.
+  set +e
+  sleep "$CELL_BUDGET"
+  # Written before the signal, so it is already on disk when k6_run returns.
+  : > "$STATS/interrupted"
+  echo "run-cell: ${CELL_BUDGET}s de orçamento estourados, SIGINT no k6" >&2
+  docker kill --signal=INT "$K6_NAME" > /dev/null 2>&1
+  sleep "$BUDGET_GRACE"
+  docker kill --signal=KILL "$K6_NAME" > /dev/null 2>&1
+}
+
+stop_budget() {
+  [ -n "${BUDGET:-}" ] || return 0
+  kill "$BUDGET" 2> /dev/null || :
+  wait "$BUDGET" 2> /dev/null || :
+  BUDGET=""
+}
+
 stop_watching() {
   [ -n "${WATCHER:-}" ] || return 0
   kill "$WATCHER" 2> /dev/null || :
@@ -155,7 +198,7 @@ wait_injector() {
 # Armed only now, and this is not cosmetic: a trap set before these functions
 # exist answers "command not found" when the pre-flight fails, and the cell
 # exits 127 instead of the 1 or 2 the loop of etapa 5 reads (decisão 93).
-trap 'stop_watching; stop_injector; rm -rf "$STATS"' EXIT
+trap 'stop_watching; stop_budget; stop_injector; rm -rf "$STATS"' EXIT
 
 say "reset, seed $AUCTIONS auction(s), vacuum"
 reset
@@ -181,18 +224,34 @@ if [ -n "$CHAOS" ]; then
   STRATEGY="$STRATEGY" K6_NAME="$K6_NAME" chaos/inject.sh "$CHAOS" "$RESULTS" &
   INJECTOR=$!
 fi
+# Only the measured load is wrapped: not the warmup, not the two resets, not the
+# checker. Those are the cell being set up and verified, and none of them is
+# what a budget is being spent on.
+if [ -n "$CELL_BUDGET" ]; then
+  say "orçamento: ${CELL_BUDGET}s de carga medida"
+  budget_watch &
+  BUDGET=$!
+fi
 say "load: scenario=$SCENARIO auctions=$AUCTIONS policy=$POLICY"
 set +e
 k6_run
 k6_code=$?
 set -e
+stop_budget
+interrupted=false
+if [ -f "$STATS/interrupted" ]; then interrupted=true; fi
 # 99 is a breached threshold, and http_req_failed is exactly the threshold a live
 # injection breaks — the first confirmation that the failure landed, coming from
 # the client and not from the injector. It is accepted only under chaos, and
 # every other code keeps aborting either way: a generator that crashed is not an
 # injection (decisão 83).
 if [ "$k6_code" -ne 0 ]; then
-  if [ -n "$CHAOS" ] && [ "$k6_code" -eq 99 ]; then
+  # The budget expiring is a result and not a failure: the cell carries on to
+  # the reset, the env.json and the checker exactly like any other, and what
+  # says it was watched for less time is one field of env.json (RF02).
+  if [ "$interrupted" = true ]; then
+    say "k6 saiu $k6_code depois do SIGINT: célula válida, observada por menos tempo"
+  elif [ -n "$CHAOS" ] && [ "$k6_code" -eq 99 ]; then
     say "k6 exited 99: the threshold broke under $CHAOS, which is the evidence"
   else
     echo "run-cell: k6 exited $k6_code" >&2
@@ -214,6 +273,7 @@ say "recording the environment"
 RUN="$RUN" STRATEGY="$STRATEGY" AUCTIONS="$AUCTIONS" POLICY="$POLICY" SCENARIO="$SCENARIO" \
   STARTED_AT="$started" FINISHED_AT="$finished" \
   K6_CPUS="$k6_cpus" K6_MEM_BYTES="${memory:-0}" K6_IMAGE="${image:-}" \
+  CELL_INTERRUPTED="$interrupted" \
   GENERATOR_CPU_PCT_PEAK="$peak_pct" \
   bench/env.sh > "$RESULTS/env.json"
 
