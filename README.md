@@ -8,7 +8,7 @@
   </a>
 </p>
 
-## Apresentação
+## Overview
 
 An auction is the worst concurrency case in ordinary software: everyone writes to the same row, every write has to read the latest state before deciding, and nothing may be lost or applied twice.
 
@@ -31,15 +31,15 @@ flowchart LR
   pg ==> checker
 ```
 
-## Resultados
+## Results
 
 ```text
-aceitos/s por contenção · ramp · immediate
+accepts/s by contention · ramp · immediate
 
-                     1 leilão    10 leilões  1000 leilões
-Otimista                 6.61        101.65       1397.80
-Pessimista              35.84        257.46       1381.24
-Single-writer           46.21        319.87       1651.43
+                      1 auction     10 auctions   1000 auctions
+Optimistic                 6.61          101.65         1397.80
+Pessimistic               35.84          257.46         1381.24
+Single-writer             46.21          319.87         1651.43
 ```
 
 | Contention | Optimistic | Single writer | Gap |
@@ -67,7 +67,7 @@ make chaos                                         # the failure injections
 PLAN=slice CELL_BUDGET=240 bench/run-matrix.sh     # the nine cells above, ~30min
 ```
 
-## Conclusão
+## Conclusion
 
 The bet paid off. The single writer wins at every level measured, and the cost of optimistic locking scales with contention: 7x, then 3.1x, then 1.2x as the fight for one row dissolves into a thousand.
 
