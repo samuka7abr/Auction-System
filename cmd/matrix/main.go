@@ -53,25 +53,31 @@ const (
 const exhaustionWarn = 0.20
 
 func main() {
-	var dir, out string
+	var dir, out, kind string
 	flag.StringVar(&dir, "dir", "", "directory holding one matrix's cells")
 	flag.StringVar(&out, "out", "", "where matrix.json and matrix.md go (default: -dir)")
+	flag.StringVar(&kind, "plan", planFull, "which plan the directory was measured against: full or slice")
 	flag.Parse()
 
-	os.Exit(execute(dir, out, os.Stdout))
+	os.Exit(execute(dir, out, kind, os.Stdout))
 }
 
-func execute(dir, out string, w io.Writer) int {
+func execute(dir, out, kind string, w io.Writer) int {
 	if dir == "" {
 		fmt.Fprintln(w, "matriz NÃO PUBLICÁVEL:")
 		fmt.Fprintln(w, "  -dir é obrigatório")
+		return exitUnpublishable
+	}
+	if kind != planFull && kind != planSlice {
+		fmt.Fprintln(w, "matriz NÃO PUBLICÁVEL:")
+		fmt.Fprintf(w, "  -plan é %s ou %s, não %q\n", planFull, planSlice, kind)
 		return exitUnpublishable
 	}
 	if out == "" {
 		out = dir
 	}
 
-	m, refusals := read(dir)
+	m, refusals := read(dir, kind)
 
 	// All of them, never only the first: a matrix with three problems reporting
 	// one per run costs three runs to find the third, and each run that needs
@@ -118,15 +124,37 @@ type planned struct {
 	Policy   string
 }
 
+// The two plans a directory can have been measured against. The nine refusals
+// run against whichever one is named, because R1 counts the cells OF A PLAN: a
+// slice judged as a full matrix is 27 refusals for cells nobody ran.
+const (
+	planFull  = "full"
+	planSlice = "slice"
+)
+
 // The order of decisão 94: contention outermost, strategy innermost. Cell 37 is
 // cell 01 again, and it is the control.
-func plan() []planned {
+//
+// The slice is the main graph and nothing else — throughput by contention, one
+// line per strategy — which is a function of two variables and therefore of
+// nine cells, at one scenario and one policy. It keeps the numbers those cells
+// have in the full plan, so a cell measured in a slice and the same cell of a
+// future full matrix are comparable without renaming anything (spec 02).
+func plan(kind string) []planned {
 	var p []planned
+	order := 1
 	for _, auctions := range []int64{1, 10, 1000} {
 		for _, scenario := range []string{"ramp", "last_second_spike"} {
 			for _, policy := range []string{"immediate", "jitter"} {
 				for _, strategy := range []string{"optimistic", "pessimistic", "shard"} {
-					n := len(p) + 1
+					// The order is the cell's number in the plan of 37, counted
+					// before the slice drops anything: the slice selects cells,
+					// it does not renumber them.
+					n := order
+					order++
+					if kind == planSlice && (scenario != "ramp" || policy != "immediate") {
+						continue
+					}
 					p = append(p, planned{
 						Order:    n,
 						Name:     fmt.Sprintf("%02d-%s-a%d-%s-%s", n, strategy, auctions, scenario, policy),
@@ -180,6 +208,17 @@ type cellReport struct {
 	Policy   string `json:"policy"`
 	Scenario string `json:"scenario"`
 	PoolSize *int64 `json:"poolSize"`
+	// Absent means a cell measured before etapa 5 gave the harness a budget,
+	// and a cell nobody interrupted — the two are the same statement here.
+	Interrupted *bool `json:"interrupted"`
+}
+
+// interrupted is the one question the checker cannot answer about a cell: it
+// verifies correctness, and a cell watched for less time is not an incorrect
+// cell. It is also not a failure — it is a cell that did not converge, and it
+// goes into the table by name instead of by rate (spec 02).
+func interrupted(c *loaded) bool {
+	return c != nil && c.env.Cell != nil && c.env.Cell.Interrupted != nil && *c.env.Cell.Interrupted
 }
 
 type generatorReport struct {
@@ -238,9 +277,9 @@ func (r *reader) refuse(id, name, format string, args ...any) {
 	r.refusals = append(r.refusals, fmt.Sprintf("%s ·%s %s", id, where, fmt.Sprintf(format, args...)))
 }
 
-func read(dir string) (matrix, []string) {
+func read(dir, kind string) (matrix, []string) {
 	r := &reader{dir: dir}
-	p := plan()
+	p := plan(kind)
 	m := matrix{Matrix: filepath.Base(dir)}
 
 	present := r.checkDirectories(p)
