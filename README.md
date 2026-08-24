@@ -51,13 +51,13 @@ Three strategies are only comparable if everything else is identical. Four metho
 
 ### The axes
 
-The measurement is a matrix of **36 cells**: three strategies × three contention levels × two load scenarios × two retry policies.
+The measurement is a matrix of **36 cells**: three strategies × three contention levels × two load scenarios × two retry policies. The results below are a **nine-cell slice** of it — the three strategies across the three contention levels, at one scenario and one policy, which is the smallest cut that still draws the main graph.
 
 - **Contention** is the independent variable: the same offered load spread over 1, 10 or 1000 auctions. One auction is total contention; a thousand is almost none. This axis is what reveals the crossing point.
 - **Scenario** is either a ramp that climbs to 500 concurrent clients over two minutes, or a spike that drops 1000 concurrent clients at once for fifteen seconds — the last-second sniping case.
 - **Retry policy** is immediate retry or exponential backoff with full jitter.
 
-Retry policy is an axis rather than a constant because of the strongest criticism the project can receive: *"your optimistic engine collapsed because you retried without backoff — with jitter it survives and your thesis falls."* That criticism is valid, so both policies are measured. If backoff saves the optimistic engine, the hypothesis is falsified — and that is a result, not a failure.
+Retry policy is an axis rather than a constant because of the strongest criticism the project can receive: *"your optimistic engine collapsed because you retried without backoff — with jitter it survives and your thesis falls."* That criticism is valid, so both policies are in the plan. **The run published below measured only immediate retry**, which means the criticism still stands against this graph: nothing here rules out backoff rescuing the optimistic engine. If it does, the hypothesis is falsified — and that is a result, not a failure.
 
 ### What is constant, stated precisely
 
@@ -127,8 +127,44 @@ The three strategies sit behind one interface, so swapping them changes an envir
 
 ---
 
-## Status
+## Results
 
-The system, its proofs and its chaos scenarios are built. The matrix run is the instrument that turns them into data, and publishing the numbers and the crossing-point graph is the stage after that.
+Measured 2026-08-24 at commit `6c4e90d`, clean tree, pool 25, ramp scenario, immediate retry. Nine cells plus the control cell, published by the aggregator from the per-cell artefacts.
+
+```text
+aceitos/s por contenção · ramp · immediate
+
+                     1 leilão    10 leilões  1000 leilões
+Otimista                 6.61        101.65       1397.80
+Pessimista              35.84        257.46       1381.24
+Single-writer           46.21        319.87       1651.43
+```
+
+**Under maximum contention the optimistic strategy delivers 6.61 accepts/s against 35.84 for pessimistic and 46.21 for single-writer** — seven times less, at 152 attempts per accept and 997 conflicts/s. Single-writer leads at all three levels measured. The control cell diverged by 2.1%, so execution order does not explain the distance between the curves.
+
+The finding survives the instrument rather than depending on it: in the cells where the optimistic engine loses, the load generator sat at 43% and 55% of its own CPU limit, while pessimistic and single-writer ran at ~105%. The loser measured with room to spare and the winners measured at the ceiling, so 35.84 and 46.21 are floors — the real gap is wider, never narrower.
+
+### What this does not show
+
+1. **Twenty-seven of the thirty-six cells.** The `last_second_spike` and `jitter` axes were not run. The backoff criticism above is unanswered.
+2. **The one-auction column runs above 90% exhaustion** in all three engines: nine of every ten logical bids give up before being accepted, so that column measures the bidder's retry budget as much as it measures the engine.
+3. **The thousand-auction row is the generator's ceiling.** All three engines pinned the load generator at ~105% and landed within 15% of each other. The apparent crossing between optimistic and pessimistic there is 1.2% — smaller than the control's own 2.1% divergence, which is to say inside the noise. **No crossing point is established by this data.**
+
+The full table, the per-cell warnings and the artefact paths are in [docs/projeto/benchmark.md](docs/projeto/benchmark.md).
+
+---
+
+## Running it
+
+```bash
+make up                                   # postgres, redis, auctiond, closerd, prometheus, grafana
+make bench                                # one cell, default optimistic
+make chaos                                # the five failure scenarios
+
+PLAN=slice CELL_BUDGET=240 bench/run-matrix.sh    # the nine cells of the graph, ~30min
+bench/run-matrix.sh                                # all 36 plus the control, ~4h30
+```
+
+The matrix loop is called directly and never through `make`: GNU make collapses every recipe failure into its own exit code 2, and this loop keeps three codes apart — a violated invariant (1), a cell it could not verify (2) and a breached threshold (99).
 
 Measurement artefacts are deliberately not versioned. What becomes durable is the *read* result — the filled table, the graph, and the text explaining them — reviewed as prose rather than as shell.
