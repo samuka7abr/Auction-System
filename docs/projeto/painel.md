@@ -2,7 +2,7 @@
 
 [← índice](../README.md)
 
-*Etapa 5b.*
+*Etapa 5b — **abandonada**. Este documento fica como registro do que foi desenhado e não construído: não existe `web/`, e os números do mock abaixo são ilustrativos, nunca medidos. Os números reais estão em [benchmark.md](benchmark.md#resultados).*
 
 Não é uma interface de leilão. É um **painel de instrumentos**: três colunas lado a lado, uma por estratégia, consumindo os três `auctiond` simultaneamente enquanto o k6 martela os três com carga idêntica.
 
