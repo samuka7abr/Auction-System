@@ -19,6 +19,7 @@ const testCommit = "0123456789abcdef0123456789abcdef01234567"
 
 type synth struct {
 	t     *testing.T
+	kind  string
 	cells map[string]*synthCell
 }
 
@@ -29,10 +30,12 @@ type synthCell struct {
 	absent  bool
 }
 
-func newSynth(t *testing.T) *synth {
+func newSynth(t *testing.T) *synth { return newSynthPlan(t, planFull) }
+
+func newSynthPlan(t *testing.T, kind string) *synth {
 	t.Helper()
-	s := &synth{t: t, cells: map[string]*synthCell{}}
-	for _, p := range plan() {
+	s := &synth{t: t, kind: kind, cells: map[string]*synthCell{}}
+	for _, p := range plan(kind) {
 		s.cells[p.Name] = &synthCell{
 			env:     baseEnv(p),
 			client:  baseClient(p),
@@ -132,7 +135,7 @@ func (s *synth) run() (int, string, string) {
 	s.t.Helper()
 	dir := s.write()
 	var out bytes.Buffer
-	code := execute(dir, "", &out)
+	code := execute(dir, "", s.kind, &out)
 	return code, out.String(), dir
 }
 
@@ -217,7 +220,7 @@ func TestIntruderDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if code := execute(dir, "", &out); code != exitUnpublishable {
+	if code := execute(dir, "", planFull, &out); code != exitUnpublishable {
 		t.Fatalf("exit = %d, queria 2\n%s", code, out.String())
 	}
 	mustContain(t, out.String(), "R1", "38-shard-a1-ramp-immediate", "fora do plano")
@@ -417,11 +420,11 @@ func TestIdempotent(t *testing.T) {
 	s := newSynth(t)
 	dir := s.write()
 	var first, second bytes.Buffer
-	if code := execute(dir, "", &first); code != exitOK {
+	if code := execute(dir, "", planFull, &first); code != exitOK {
 		t.Fatalf("primeira execução saiu %d\n%s", code, first.String())
 	}
 	a := mustRead(t, filepath.Join(dir, "matrix.json"))
-	if code := execute(dir, "", &second); code != exitOK {
+	if code := execute(dir, "", planFull, &second); code != exitOK {
 		t.Fatalf("segunda execução saiu %d\n%s", code, second.String())
 	}
 	b := mustRead(t, filepath.Join(dir, "matrix.json"))
@@ -433,6 +436,83 @@ func TestIdempotent(t *testing.T) {
 	if first.String() != second.String() {
 		t.Error("a tabela do stdout mudou entre duas execuções")
 	}
+}
+
+// The slice is judged against the slice's plan: ten cells, nine rows, the same
+// control and the same nine refusals. Judged against the full plan it would be
+// twenty-seven refusals for cells nobody ran.
+func TestSlicePlan(t *testing.T) {
+	code, out, dir := newSynthPlan(t, planSlice).run()
+	if code != exitOK {
+		t.Fatalf("exit = %d, queria 0\n%s", code, out)
+	}
+	m := published(t, dir)
+	if !m.Publishable || len(m.Cells) != 9 {
+		t.Fatalf("publishable=%v com %d linhas, queria true com 9", m.Publishable, len(m.Cells))
+	}
+	if m.Control == nil || m.Control.Verdict != "OK" {
+		t.Errorf("controle = %+v, queria veredito OK", m.Control)
+	}
+	// The numbers of the full plan, kept: a cell of the slice has to be
+	// comparable with the same cell of a future full matrix.
+	if m.Cells[3].Order != 13 || m.Cells[8].Order != 27 {
+		t.Errorf("a fatia renumerou as células: %d e %d", m.Cells[3].Order, m.Cells[8].Order)
+	}
+	mustContain(t, out, "## Gráfico principal", "aceitos/s por contenção",
+		"1 leilão", "1000 leilões")
+}
+
+// The cell that does not converge: it is in the table, it has no rate, and the
+// matrix goes on being publishable. Refusing it would turn the strongest
+// finding of the project into the reason there is no result.
+func TestInterruptedCellHasNoRate(t *testing.T) {
+	s := newSynthPlan(t, planSlice)
+	s.at("02").env["cell"].(map[string]any)["interrupted"] = true
+	code, out, dir := s.run()
+	if code != exitOK {
+		t.Fatalf("exit = %d, queria 0\n%s", code, out)
+	}
+	m := published(t, dir)
+	if !m.Publishable {
+		t.Error("publishable = false por causa de uma célula interrompida")
+	}
+	seen := false
+	for _, c := range m.Cells {
+		if c.Order != 2 {
+			if c.AcceptedPerSecond == nil {
+				t.Errorf("a ausência de taxa vazou para a célula %02d", c.Order)
+			}
+			continue
+		}
+		seen = true
+		if c.AcceptedPerSecond != nil || c.ConflictPerSecond != nil || c.AttemptsPerAccept != nil {
+			t.Error("a célula interrompida publicou taxa")
+		}
+		// Counts and distributions survive: the window samples them, it does
+		// not dilute them.
+		if !c.Interrupted || c.Accepted != 102 || c.ConfirmP95Ms == 0 {
+			t.Errorf("linha da célula interrompida = %+v", c)
+		}
+	}
+	if !seen {
+		t.Fatal("a célula 02 não entrou na tabela")
+	}
+	// null in the JSON and an em dash in the table, never a zero.
+	mustContain(t, string(mustRead(t, filepath.Join(dir, "matrix.json"))),
+		`"acceptedPerSecond": null`)
+	mustContain(t, out, "| — |", "não convergiu", "interrompida em 120s")
+}
+
+// The one place an interrupted cell does refuse: a control measured over a
+// truncated window is not a control.
+func TestInterruptedControlRefuses(t *testing.T) {
+	s := newSynthPlan(t, planSlice)
+	s.at("01").env["cell"].(map[string]any)["interrupted"] = true
+	code, out, _ := s.run()
+	if code != exitUnpublishable {
+		t.Fatalf("exit = %d, queria 2\n%s", code, out)
+	}
+	mustContain(t, out, "R9", "01-", "janela truncada")
 }
 
 func mustRead(t *testing.T, path string) []byte {
