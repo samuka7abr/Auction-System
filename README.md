@@ -3,12 +3,9 @@
 **Three concurrency strategies. One database row. 500 clients fighting over it.**
 
 <p align="left">
-  <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/go/go-original-wordmark.svg" width="55" height="55" alt="Go"/>
-  <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/postgresql/postgresql-original-wordmark.svg" width="55" height="55" alt="PostgreSQL"/>
-  <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/redis/redis-original-wordmark.svg" width="55" height="55" alt="Redis"/>
-  <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/docker/docker-original-wordmark.svg" width="55" height="55" alt="Docker"/>
-  <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/grafana/grafana-original.svg" width="55" height="55" alt="Grafana"/>
-  <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/prometheus/prometheus-original.svg" width="55" height="55" alt="Prometheus"/>
+  <a href="https://skillicons.dev">
+    <img src="https://skillicons.dev/icons?i=go,postgres,redis,docker,grafana,prometheus" alt="Go, PostgreSQL, Redis, Docker, Grafana, Prometheus"/>
+  </a>
 </p>
 
 ## Apresentação
