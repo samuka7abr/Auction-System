@@ -144,16 +144,43 @@ Cada run grava `results/<run>/env.json` com commit, pool, CPUs e versões — ve
 
 ## Resultados
 
-> Tabela preenchida com os números reais do `make bench`. Ambiente e commit registrados junto.
+> Medidos em 2026-08-24 no commit `6c4e90d`, árvore limpa, pool 25. São **nove células de `ramp`/`immediate`** — a fatia que desenha o gráfico principal, definida na [spec 02 da etapa 5](../specs/etapa-5/02-spec-fatia-do-grafico.md). Os números saem de `bench/results/m20260824T141228/matrix.json`, publicado por `bin/matrix`, e nenhum deles vem das métricas do processo sob teste.
+>
+> O pico é 500 VUs e não 1000: 1000 é o pico do `last_second_spike`, que não entrou nesta fatia.
 
-| Estratégia | Leilões | Retry | VUs no pico | Aceitos/s | p95 confirmação | Conflitos/s | Tentativas por aceito | Exauridos | Invariantes |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Otimista | 1 | immediate | 1000 | | | | | | |
-| Otimista | 1 | jitter | 1000 | | | | | | |
-| Otimista | 1000 | immediate | 1000 | | | | | | |
-| Pessimista | 1 | — | 1000 | | | | | | |
-| Pessimista | 1000 | — | 1000 | | | | | | |
-| Single-writer | 1 | — | 1000 | | | | | | |
-| Single-writer | 1000 | — | 1000 | | | | | | |
+| Estratégia | Leilões | Retry | VUs no pico | Aceitos/s | p95 confirmação | Conflitos/s | Tentativas por aceito | Exauridos | Invariantes | Avisos |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Otimista | 1 | immediate | 500 | 6.61 | 201.4 | 997.52 | 151.86 | 94.5% | OK | exaustão acima de 20%: 94.5% |
+| Pessimista | 1 | immediate | 500 | 35.84 | 83.0 | 0.00 | 108.40 | 91.2% | OK | gerador saturado; exaustão acima de 20%: 91.2%; 1 aviso do checker |
+| Single-writer | 1 | immediate | 500 | 46.21 | 86.0 | 0.00 | 112.27 | 91.5% | OK | gerador saturado; exaustão acima de 20%: 91.5%; 1 aviso do checker |
+| Otimista | 10 | immediate | 500 | 101.65 | 173.4 | 1167.86 | 12.49 | 48% | OK | exaustão acima de 20%: 48% |
+| Pessimista | 10 | immediate | 500 | 257.46 | 97.4 | 0.00 | 16.08 | 52.5% | OK | gerador saturado; exaustão acima de 20%: 52.5%; 1 aviso do checker |
+| Single-writer | 10 | immediate | 500 | 319.87 | 101.0 | 0.00 | 14.63 | 49.7% | OK | gerador saturado; exaustão acima de 20%: 49.7%; 1 aviso do checker |
+| Otimista | 1000 | immediate | 500 | 1397.80 | 123.4 | 1522.34 | 2.09 | 0% | OK | gerador saturado; 1 aviso do checker |
+| Pessimista | 1000 | immediate | 500 | 1381.24 | 163.8 | 0.00 | 2.10 | 0% | OK | gerador saturado; 1 aviso do checker |
+| Single-writer | 1000 | immediate | 500 | 1651.43 | 106.5 | 0.00 | 2.10 | 0% | OK | gerador saturado; 1 aviso do checker |
 
-Gráfico principal: **throughput por nível de contenção**, uma linha por estratégia, com o ponto de cruzamento marcado.
+### Gráfico principal
+
+```text
+aceitos/s por contenção · ramp · immediate
+
+                     1 leilão    10 leilões  1000 leilões
+Otimista                 6.61        101.65       1397.80
+Pessimista              35.84        257.46       1381.24
+Single-writer           46.21        319.87       1651.43
+```
+
+**O que está estabelecido:** sob contenção máxima o otimista entrega 6.61 aceitos/s contra 35.84 do pessimista e 46.21 do single-writer — sete vezes menos, com 152 tentativas por aceito e 997 conflitos/s. O single-writer ganha nos três níveis medidos.
+
+O achado se sustenta apesar do gerador, e não graças a ele: nas células onde o otimista perde, o k6 estava a 43% e 55% do próprio limite, enquanto pessimista e single-writer rodaram a ~105%. O perdedor mediu folgado, os vencedores mediram no teto — então 35.84 e 46.21 são pisos, e a distância real é maior, nunca menor.
+
+### O que esta tabela não mede
+
+1. **Vinte e sete das trinta e seis células.** Faltam os eixos `last_second_spike` (o gume do sniping) e `jitter` (retentativa com backoff). A crítica mais forte ao resultado acima — *"o otimista colapsou porque você retentou sem backoff"* — **continua sem resposta**, e as 152 tentativas por aceito da primeira linha são exatamente o que ela ataca. O harness roda essas células sem alteração nenhuma; o que faltou foi tempo de máquina.
+2. **A coluna de 1 leilão tem exaustão acima de 90%** nas três engines: nove em cada dez lances lógicos desistem antes de serem aceitos. Essa coluna mede o `MAX_RETRIES` do apostador tanto quanto a engine (decisão 106).
+3. **A linha de 1000 leilões é o teto do gerador.** As três engines a ~105% do limite de CPU do k6 e os três números a 15% umas das outras. O "cruzamento" aparente entre otimista e pessimista ali é de **1.2%** — menor que os **2.1%** de divergência do próprio controle, isto é, dentro do ruído que o controle existe para medir. **Não há ponto de cruzamento estabelecido por estes dados.**
+
+### Controle
+
+A célula 01 repetida por último (37): 6.61 vs 6.47 aceitos/s · divergência **2.1%** · OK. Abaixo dos 10% que a decisão 95 trata como ruído indistinguível de deriva, então a ordem de execução não explica a distância entre as curvas.
