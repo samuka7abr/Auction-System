@@ -48,7 +48,7 @@ AUCTIOND_URL="${AUCTIOND_URL:-http://localhost:${HTTP_PORT:-8080}}"
 
 RESULTS="bench/results/$RUN"
 MANIFEST="bench/auctions.json"
-K6_NAME="bid-storm-k6-$RUN"
+K6_NAME="bid-storm-k6-$(printf '%s' "$RUN" | tr -c '[:alnum:]_.-' '-')"
 STATS="$(mktemp -d)"
 
 pg() { docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -qtA "$@"; }
