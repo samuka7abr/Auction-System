@@ -34,6 +34,26 @@ fi
 ENDS_IN="${ENDS_IN:-30m}"
 MIN_INCREMENT="${MIN_INCREMENT:-100}"
 
+# full is the 36 cells and the control. slice is the main graph and nothing
+# else: three strategies over three levels of contention, at one scenario and
+# one policy, plus the control — ten cells that fit in one working session
+# (spec 02). A second script would be a copy of this one whose pre-flight and
+# whose rm -rf guards drift apart at the first fix (decisão 109).
+PLAN_KIND="${PLAN:-full}"
+case "$PLAN_KIND" in
+  full | slice) ;;
+  *) echo "run-matrix: PLAN é full ou slice, não '$PLAN_KIND'" >&2; exit 2 ;;
+esac
+
+# The budget the harness gives itself per cell, passed through to run-cell.sh.
+# Empty is every matrix before this one: no timeout anywhere.
+CELL_BUDGET="${CELL_BUDGET:-}"
+if [ -n "$CELL_BUDGET" ]; then
+  case "$CELL_BUDGET" in
+    *[!0-9]* | 0) echo "run-matrix: CELL_BUDGET em segundos inteiros maiores que zero, não '$CELL_BUDGET'" >&2; exit 2 ;;
+  esac
+fi
+
 MATRIX="${MATRIX:-m$(date -u +%Y%m%dT%H%M%S)}"
 RESUME="${RESUME:-}"
 ROOT="bench/results/$MATRIX"
@@ -48,7 +68,12 @@ die() { echo "run-matrix: $*" >&2; exit 2; }
 # compared at one point of the graph run adjacent in time, inside the same
 # window of minutes. Grouping by strategy would save nine minutes and let any
 # drift over ninety of them enter the graph wearing a strategy's name.
-PLAN=()
+#
+# The slice keeps the numbers the cells have in the full plan — 01, 02, 03, 13,
+# 14, 15, 25, 26, 27 and 37 — so a cell measured in the slice is comparable byte
+# for byte with the same cell of a future full matrix, and a slice directory can
+# be resumed as a full one without renaming anything.
+PLAN_ROWS=()
 build_plan() {
   local n=0 auctions scenario policy strategy
   for auctions in 1 10 1000; do
@@ -56,23 +81,39 @@ build_plan() {
       for policy in immediate jitter; do
         for strategy in optimistic pessimistic shard; do
           n=$((n + 1))
-          PLAN+=("$(printf '%02d' "$n")-$strategy-a$auctions-$scenario-$policy|$strategy|$auctions|$scenario|$policy")
+          # n is incremented before the skip, and that is the point: the slice
+          # selects cells out of the plan of 37, it does not renumber them.
+          if [ "$PLAN_KIND" = slice ] &&
+            { [ "$scenario" != ramp ] || [ "$policy" != immediate ]; }; then
+            continue
+          fi
+          PLAN_ROWS+=("$(printf '%02d' "$n")-$strategy-a$auctions-$scenario-$policy|$strategy|$auctions|$scenario|$policy")
         done
       done
     done
   done
   # Cell 37 is cell 01 again, last. The aggregator turns the distance between
   # the two into a number with a verdict (decisão 95).
-  PLAN+=("37-control-optimistic-a1-ramp-immediate|optimistic|1|ramp|immediate")
+  PLAN_ROWS+=("37-control-optimistic-a1-ramp-immediate|optimistic|1|ramp|immediate")
 }
 
 # ramp is 2m of load over a 24s warmup; last_second_spike is 15s over 3s. The
 # rest is reset, seed, VACUUM, FLUSHALL, the checker and the recreate.
-seconds_of() { case "$1" in ramp) echo 190 ;; *) echo 65 ;; esac; }
+#
+# A cell that does not converge ends at the budget instead of at its scenario,
+# so with a budget set the estimate takes whichever is longer: announcing three
+# minutes for a cell that will take four is the estimate lying to whoever
+# decided, on the strength of it, to wait.
+seconds_of() {
+  local nominal
+  case "$1" in ramp) nominal=190 ;; *) nominal=65 ;; esac
+  if [ -n "$CELL_BUDGET" ] && [ "$CELL_BUDGET" -gt "$nominal" ]; then nominal=$CELL_BUDGET; fi
+  echo "$nominal"
+}
 
 in_plan() {
   local entry
-  for entry in "${PLAN[@]}"; do
+  for entry in "${PLAN_ROWS[@]}"; do
     [ "${entry%%|*}" = "$1" ] && return 0
   done
   return 1
@@ -136,7 +177,7 @@ preflight() {
     # Moved here from the aggregator, where the same refusal costs ninety
     # minutes instead of two seconds: two cells built from different commits
     # are not one matrix (decisão 100).
-    for entry in "${PLAN[@]}"; do
+    for entry in "${PLAN_ROWS[@]}"; do
       commit=$(jq -r 'if .git.commit == null then "" else .git.commit end' \
         "$ROOT/${entry%%|*}/env.json" 2> /dev/null) || continue
       [ -n "$commit" ] || continue
@@ -176,7 +217,7 @@ build_plan
 
 selected=()
 total=0
-for entry in "${PLAN[@]}"; do
+for entry in "${PLAN_ROWS[@]}"; do
   IFS='|' read -r name strategy auctions scenario policy <<< "$entry"
   if [ -n "$ONLY" ] && ! printf '%s' "$name" | grep -Eq "$ONLY"; then continue; fi
   selected+=("$entry")
@@ -202,7 +243,7 @@ trap 'echo; echo "run-matrix: interrompida. Retome com: MATRIX=$MATRIX RESUME=1 
 
 preflight
 
-say "$MATRIX · ${#selected[@]} célula(s) · estimativa $((total / 60))min"
+say "$MATRIX · plano $PLAN_KIND · ${#selected[@]} célula(s) · estimativa $((total / 60))min"
 for entry in "${selected[@]}"; do plan_line "$entry"; done
 
 for entry in "${selected[@]}"; do
@@ -231,7 +272,8 @@ for entry in "${selected[@]}"; do
   code=0
   RUN="$MATRIX/$name" STRATEGY="$strategy" AUCTIONS="$auctions" \
     SCENARIO="$scenario" POLICY="$policy" ENDS_IN="$ENDS_IN" \
-    MIN_INCREMENT="$MIN_INCREMENT" CHAOS="" bench/run-cell.sh || code=$?
+    MIN_INCREMENT="$MIN_INCREMENT" CELL_BUDGET="$CELL_BUDGET" \
+    CHAOS="" bench/run-cell.sh || code=$?
 
   # The code leaves this script untranslated. 1 is a result about the engine and
   # deserves to be read before the machine does anything else; 2 is the absence
@@ -247,5 +289,5 @@ done
 
 say "agregando $ROOT"
 code=0
-bin/matrix -dir "$ROOT" || code=$?
+bin/matrix -dir "$ROOT" -plan "$PLAN_KIND" || code=$?
 exit "$code"
