@@ -28,7 +28,7 @@ func TestDurabilityReadsTheThreeWaysTheCountsCanDiffer(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := checkDurability(tc.db, baseClient(), nil); got.Verdict != tc.want {
+			if got := checkDurability(tc.db, baseClient(), envReport{}, nil); got.Verdict != tc.want {
 				t.Errorf("verdict = %s (%s), want %s", got.Verdict, got.Detail, tc.want)
 			}
 		})
@@ -59,7 +59,32 @@ func TestDurabilityUnderChaosLoosensOnlyTheSafeDirection(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			chaos := &chaosReport{Scenario: "auctiond-kill", Target: "auctiond", Strategy: "shard", Landed: true}
-			if got := checkDurability(tc.db, baseClient(), chaos); got.Verdict != tc.want {
+			if got := checkDurability(tc.db, baseClient(), envReport{}, chaos); got.Verdict != tc.want {
+				t.Errorf("verdict = %s (%s), want %s", got.Verdict, got.Detail, tc.want)
+			}
+		})
+	}
+}
+
+// The budget of spec 02 cuts the client instead of the server, and the trace it
+// leaves is the same one: a bid committed by a live server whose 201 nobody was
+// left to read. The direction that does not move is the point of the case.
+func TestDurabilityInterruptedLoosensOnlyTheSafeDirection(t *testing.T) {
+	cases := []struct {
+		name string
+		db   cellTotals
+		want verdict
+	}{
+		{"equal", cellTotals{Bids: 100, MaxSeq: 100}, verdictOK},
+		{"database ahead", cellTotals{Bids: 101, MaxSeq: 101}, verdictWarn},
+		{"database behind", cellTotals{Bids: 99, MaxSeq: 100}, verdictFail},
+	}
+	cut := true
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := envReport{Cell: &cellReport{Interrupted: &cut}}
+			got := checkDurability(tc.db, baseClient(), e, nil)
+			if got.Verdict != tc.want {
 				t.Errorf("verdict = %s (%s), want %s", got.Verdict, got.Detail, tc.want)
 			}
 		})
